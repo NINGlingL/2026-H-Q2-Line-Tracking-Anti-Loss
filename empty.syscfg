@@ -61,12 +61,12 @@ GPIO3.associatedPins[0].pin.$assign      = "PB21";
 ADC121.$name                      = "BAT_ADC";
 ADC121.sampClkSrc                 = "DL_ADC12_CLOCK_ULPCLK";
 ADC121.sampClkDiv                 = "DL_ADC12_CLOCK_DIVIDE_8";
-ADC121.adcMem0chansel             = "DL_ADC12_INPUT_CHAN_2";
+ADC121.adcMem0chansel             = "DL_ADC12_INPUT_CHAN_0";
 ADC121.sampleTime0                = "125 us";
 ADC121.powerDownMode              = "DL_ADC12_POWER_DOWN_MODE_MANUAL";
-ADC121.peripheral.$assign         = "ADC1";
-ADC121.peripheral.adcPin2.$assign = "PA17";
-ADC121.adcPin2Config.$name        = "ti_driverlib_gpio_GPIOPinGeneric12";
+ADC121.peripheral.$assign         = "ADC0";
+ADC121.peripheral.adcPin0.$assign = "PA27";
+ADC121.adcPin0Config.$name        = "ti_driverlib_gpio_GPIOPinGeneric12";
 
 I2C1.$name                             = "OLED";
 I2C1.basicEnableController             = true;

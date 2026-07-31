@@ -182,14 +182,14 @@ extern "C" {
 
 
 /* Defines for BAT_ADC */
-#define BAT_ADC_INST                                                        ADC1
-#define BAT_ADC_INST_IRQHandler                                  ADC1_IRQHandler
-#define BAT_ADC_INST_INT_IRQN                                    (ADC1_INT_IRQn)
+#define BAT_ADC_INST                                                        ADC0
+#define BAT_ADC_INST_IRQHandler                                  ADC0_IRQHandler
+#define BAT_ADC_INST_INT_IRQN                                    (ADC0_INT_IRQn)
 #define BAT_ADC_ADCMEM_0                                      DL_ADC12_MEM_IDX_0
 #define BAT_ADC_ADCMEM_0_REF                     DL_ADC12_REFERENCE_VOLTAGE_VDDA
 #define BAT_ADC_ADCMEM_0_REF_VOLTAGE_V                                       3.3
-#define GPIO_BAT_ADC_C2_PORT                                               GPIOA
-#define GPIO_BAT_ADC_C2_PIN                                       DL_GPIO_PIN_17
+#define GPIO_BAT_ADC_C0_PORT                                               GPIOA
+#define GPIO_BAT_ADC_C0_PIN                                       DL_GPIO_PIN_27
 
 
 

@@ -4,9 +4,11 @@
 /*
  * Hardware safety gate.
  *
- * Keep this at 0 until BOTH conditions are physically verified:
- *   1. PB14/STBY has an external 10 kOhm pull-down.
- *   2. PA17 is connected to the motor supply through a validated divider.
+ * Keep this at 0 until PA27 is connected to the motor supply through a
+ * validated divider and the battery cutoff is configured.
+ *
+ * PB14 may connect directly to a genuine TB6612FNG STBY input because the
+ * device datasheet specifies an internal 200 kOhm pull-down on STBY.
  *
  * The firmware still builds and all sensors/diagnostics run while locked,
  * but Moto_SetLR() cannot raise STBY.
@@ -19,8 +21,8 @@
 #define APP_PWM_MAX_PERMILLE           (800)
 
 /*
- * Battery divider proposal: supply -- 39k -- PA17 -- 10k -- GND.
- * The low threshold remains zero until the battery chemistry is confirmed.
+ * Battery divider proposal: supply -- 39k -- PA27 -- 10k -- GND.
+ * The low threshold remains zero until the pack series count is confirmed.
  */
 #define APP_BATTERY_DIV_TOP_OHM        (39000UL)
 #define APP_BATTERY_DIV_BOTTOM_OHM     (10000UL)
