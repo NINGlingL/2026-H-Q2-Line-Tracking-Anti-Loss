@@ -13,10 +13,10 @@
  * The firmware still builds and all sensors/diagnostics run while locked,
  * but Moto_SetLR() cannot raise STBY.
  */
-#define APP_MOTOR_HW_READY             (0U)
+#define APP_MOTOR_HW_READY             (1U)
 
 /*
- * Sensor monitor: OLED + ICM20948, with the motor compile-time locked.
+ * OLED + ICM20948 + motor/HC-05 diagnostic control enabled.
  */
 #define APP_ENABLE_OLED                (1U)
 #define APP_ENABLE_IMU                 (1U)

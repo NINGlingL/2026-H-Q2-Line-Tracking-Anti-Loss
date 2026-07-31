@@ -35,6 +35,20 @@ void BT_INST_IRQHandler(void)
 
 /* ========== 初始化 ========== */
 
+static void poll_rx_fifo(void)
+{
+    while (!DL_UART_Main_isRXFIFOEmpty(BT_INST)) {
+        uint16_t next = (uint16_t) ((g_wr + 1U) % UART_BT_BUF_SIZE);
+        uint8_t byte = DL_UART_Main_receiveData(BT_INST);
+
+        g_total++;
+        if (next != g_rd) {
+            g_ring[g_wr] = byte;
+            g_wr = next;
+        }
+    }
+}
+
 void UartBT_Init(void)
 {
     g_wr = 0U;
@@ -42,17 +56,25 @@ void UartBT_Init(void)
     g_total = 0U;
     DL_UART_Main_setRXFIFOThreshold(BT_INST,
         DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
-    DL_UART_Main_enableInterrupt(BT_INST,
+    /*
+     * HC-05 uses one-byte commands. Polling the RX FIFO is non-blocking and
+     * avoids depending on board-specific UART interrupt routing.
+     */
+    DL_UART_Main_disableInterrupt(BT_INST,
         DL_UART_MAIN_INTERRUPT_RX);
     DL_UART_Main_clearInterruptStatus(BT_INST, 0xFFU);
+    NVIC_DisableIRQ(BT_INST_INT_IRQN);
     NVIC_ClearPendingIRQ(BT_INST_INT_IRQN);
-    NVIC_EnableIRQ(BT_INST_INT_IRQN);
+    while (!DL_UART_Main_isRXFIFOEmpty(BT_INST)) {
+        (void) DL_UART_Main_receiveData(BT_INST);
+    }
 }
 
 /* ========== 接收 ========== */
 
 uint16_t UartBT_Available(void)
 {
+    poll_rx_fifo();
     if (g_wr >= g_rd)
         return g_wr - g_rd;
     else
@@ -61,6 +83,7 @@ uint16_t UartBT_Available(void)
 
 bool UartBT_Read(uint8_t *c)
 {
+    poll_rx_fifo();
     if (g_rd == g_wr) return false;
     *c = g_ring[g_rd];
     g_rd = (g_rd + 1) % UART_BT_BUF_SIZE;

@@ -152,8 +152,41 @@ static void enter_auto(uint32_t now_ms)
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
 }
 
+static void set_manual_motion(
+    int16_t left, int16_t right, const char *label, uint32_t now_ms)
+{
+    if (g_control.mode != CONTROL_DIAGNOSTIC) {
+        enter_diagnostic(now_ms);
+    }
+    if (g_control.mode != CONTROL_DIAGNOSTIC) {
+        g_manual_left = 0;
+        g_manual_right = 0;
+        return;
+    }
+    g_manual_left = left;
+    g_manual_right = right;
+    g_control.mode_enter_ms = now_ms;
+    (void) snprintf(g_last_command, sizeof(g_last_command), "%s", label);
+}
+
+static void refresh_manual_power(void)
+{
+    if (g_manual_left > 0) {
+        g_manual_left = g_diag_power;
+    } else if (g_manual_left < 0) {
+        g_manual_left = (int16_t) -g_diag_power;
+    }
+    if (g_manual_right > 0) {
+        g_manual_right = g_diag_power;
+    } else if (g_manual_right < 0) {
+        g_manual_right = (int16_t) -g_diag_power;
+    }
+}
+
 static void handle_command(uint8_t byte, uint32_t now_ms)
 {
+    uint8_t send_ack = 1U;
+
     switch (byte) {
         case 'D':
         case 'd':
@@ -169,39 +202,23 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             break;
         case 'F':
         case 'f':
-            if (g_control.mode != CONTROL_DIAGNOSTIC) {
-                enter_diagnostic(now_ms);
-            }
-            g_manual_left = g_diag_power;
-            g_manual_right = g_diag_power;
-            (void) snprintf(g_last_command, sizeof(g_last_command), "FWD");
+            set_manual_motion(
+                g_diag_power, g_diag_power, "FWD", now_ms);
             break;
         case 'B':
         case 'b':
-            if (g_control.mode != CONTROL_DIAGNOSTIC) {
-                enter_diagnostic(now_ms);
-            }
-            g_manual_left = (int16_t) -g_diag_power;
-            g_manual_right = (int16_t) -g_diag_power;
-            (void) snprintf(g_last_command, sizeof(g_last_command), "BACK");
+            set_manual_motion((int16_t) -g_diag_power,
+                (int16_t) -g_diag_power, "BACK", now_ms);
             break;
         case 'L':
         case 'l':
-            if (g_control.mode != CONTROL_DIAGNOSTIC) {
-                enter_diagnostic(now_ms);
-            }
-            g_manual_left = (int16_t) -g_diag_power;
-            g_manual_right = g_diag_power;
-            (void) snprintf(g_last_command, sizeof(g_last_command), "SPIN LEFT");
+            set_manual_motion((int16_t) -g_diag_power,
+                g_diag_power, "SPIN LEFT", now_ms);
             break;
         case 'R':
         case 'r':
-            if (g_control.mode != CONTROL_DIAGNOSTIC) {
-                enter_diagnostic(now_ms);
-            }
-            g_manual_left = g_diag_power;
-            g_manual_right = (int16_t) -g_diag_power;
-            (void) snprintf(g_last_command, sizeof(g_last_command), "SPIN RIGHT");
+            set_manual_motion(g_diag_power,
+                (int16_t) -g_diag_power, "SPIN RIGHT", now_ms);
             break;
         case '+':
             if (g_diag_power < APP_PWM_MAX_PERMILLE - 50) {
@@ -209,6 +226,7 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             } else {
                 g_diag_power = APP_PWM_MAX_PERMILLE;
             }
+            refresh_manual_power();
             (void) snprintf(g_last_command, sizeof(g_last_command),
                 "POWER %d", g_diag_power);
             break;
@@ -216,6 +234,7 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             if (g_diag_power > 100) {
                 g_diag_power -= 50;
             }
+            refresh_manual_power();
             (void) snprintf(g_last_command, sizeof(g_last_command),
                 "POWER %d", g_diag_power);
             break;
@@ -245,9 +264,15 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             UartBT_WriteStr(
                 "\r\nA:auto D:diag F/B/L/R S:stop +/-:power "
                 "I:IR-reverse C:IR-cal G:gyro-cal\r\n");
+            send_ack = 0U;
             break;
         default:
+            send_ack = 0U;
             break;
+    }
+    if (send_ack != 0U) {
+        UartBT_Printf("\r\nACK %c %s MODE:%s\r\n",
+            (char) byte, g_last_command, mode_name(g_control.mode));
     }
 }
 
@@ -383,6 +408,8 @@ static void run_diagnostic(uint32_t now_ms)
 static void draw_oled(void)
 {
     EightIR_State ir = EightIR_GetState();
+    Moto_State motor = Moto_GetState();
+    Battery_State battery = Battery_GetState();
     char bits[12];
     char track[12];
     char line[22];
@@ -425,6 +452,16 @@ static void draw_oled(void)
             ir.position, ir.active_count);
     }
     SSD1306_ShowString(3U, 0U, line);
+    (void) snprintf(line, sizeof(line), "BT:%s", g_last_command);
+    SSD1306_ShowString(4U, 0U, line);
+    (void) snprintf(line, sizeof(line), "M:%s L:%d R:%d",
+        mode_name(g_control.mode),
+        motor.left_permille / 10, motor.right_permille / 10);
+    SSD1306_ShowString(5U, 0U, line);
+    (void) snprintf(line, sizeof(line), "RX:%lu BAT:%lumV",
+        (unsigned long) UartBT_GetRxCount(),
+        (unsigned long) battery.millivolts);
+    SSD1306_ShowString(6U, 0U, line);
     (void) SSD1306_Update();
 }
 

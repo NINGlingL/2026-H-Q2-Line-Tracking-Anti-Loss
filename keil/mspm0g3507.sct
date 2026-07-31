@@ -9,6 +9,9 @@ LR_IROM1 0x00000000 0x00020000  {    ; load region size_region
    .ANY (+RO)
    .ANY (+XO)
   }
+  ER_FLASH_PAD +0 ALIGN 8 0x00000008  {
+   empty.o (.rodata.gMSPM0FlashWritePad)
+  }
   RW_IRAM2 0x20200000 0x00008000  {  ; RW data
    .ANY (+RW +ZI)
    .ANY (.ramfunc)

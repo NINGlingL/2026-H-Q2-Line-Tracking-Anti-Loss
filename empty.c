@@ -42,6 +42,13 @@
 #include "ti_msp_dl_config.h"
 #include "uart_bt.h"
 
+/*
+ * Keep the Keil load segment aligned for the MSPM0 64-bit flash writer.
+ * The scatter file places this inert word after the application image.
+ */
+__attribute__((used)) static const uint64_t gMSPM0FlashWritePad =
+    UINT64_C(0xFFFFFFFFFFFFFFFF);
+
 int main(void)
 {
     uint32_t now_ms;

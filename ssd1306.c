@@ -9,10 +9,12 @@
 
 #define I2C_TO            ((CPUCLK_FREQ / 1000UL) * APP_I2C_TIMEOUT_MS)
 #define I2C_HALF_PERIOD   (CPUCLK_FREQ / 200000UL)
-#define OLED_LIVE_PAGES   (4U)
+#define OLED_LIVE_PAGES   (7U)
+#define OLED_PAGES_PER_UPDATE (3U)
 static uint8_t s_buf[SSD1306_PAGES][SSD1306_WIDTH];
 static uint8_t s_online;
 static uint8_t s_address = SSD1306_I2C_ADDR;
+static uint8_t s_next_page;
 static volatile uint32_t s_error_count;
 
 static void i2c_delay(void)
@@ -221,6 +223,7 @@ uint8_t SSD1306_Init(void)
 
     configure_gpio_i2c();
     s_error_count = 0U;
+    s_next_page = 0U;
     delay_cycles(CPUCLK_FREQ / 10U);
     for (address_index = 0U;
          address_index < (uint8_t) sizeof(addresses);
@@ -255,12 +258,16 @@ void SSD1306_Clear(void) { memset(s_buf, 0, sizeof(s_buf)); }
 
 uint8_t SSD1306_Update(void)
 {
-    uint8_t page;
+    uint8_t count;
 
     if (s_online == 0U) return 0U;
-    for (page = 0U; page < OLED_LIVE_PAGES; page++) {
-        if (write_page(page) == 0U) {
+    for (count = 0U; count < OLED_PAGES_PER_UPDATE; count++) {
+        if (write_page(s_next_page) == 0U) {
             break;
+        }
+        s_next_page++;
+        if (s_next_page >= OLED_LIVE_PAGES) {
+            s_next_page = 0U;
         }
     }
     return s_online;
