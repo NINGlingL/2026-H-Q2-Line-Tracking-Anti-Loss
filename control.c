@@ -101,16 +101,30 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     }
 }
 
-static uint8_t can_enable_motion(void)
+static const char *motion_lock_reason(void)
 {
     Moto_State motor = Moto_GetState();
-    return (motor.hardware_locked == 0U && Battery_IsSafe() != 0U) ? 1U : 0U;
+    Battery_State battery = Battery_GetState();
+
+    if (motor.hardware_locked != 0U) {
+        return "LOCK:HW";
+    }
+    if (battery.configured == 0U || battery.valid == 0U) {
+        return "LOCK:BAT ADC";
+    }
+    if (battery.low_latched != 0U ||
+        battery.millivolts < APP_BATTERY_LOW_MV) {
+        return "LOCK:BAT LOW";
+    }
+    return NULL;
 }
 
 static void enter_diagnostic(uint32_t now_ms)
 {
-    if (can_enable_motion() == 0U) {
-        enter_safe("LOCK:HW/BAT", now_ms);
+    const char *lock_reason = motion_lock_reason();
+
+    if (lock_reason != NULL) {
+        enter_safe(lock_reason, now_ms);
         return;
     }
     Moto_SetSafetyPermit(1U);
@@ -125,9 +139,10 @@ static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
     Encoder_State encoder = Encoder_GetState();
+    const char *lock_reason = motion_lock_reason();
 
-    if (can_enable_motion() == 0U) {
-        enter_safe("LOCK:HW/BAT", now_ms);
+    if (lock_reason != NULL) {
+        enter_safe(lock_reason, now_ms);
         return;
     }
     if (ir.frame_fresh == 0U || ir.active_count == 0U) {
@@ -461,8 +476,9 @@ static void draw_oled(void)
         motor.standby_enabled,
         motor.left_permille / 10, motor.right_permille / 10);
     SSD1306_ShowString(5U, 0U, line);
-    (void) snprintf(line, sizeof(line), "BAT:%lumV",
-        (unsigned long) battery.millivolts);
+    (void) snprintf(line, sizeof(line), "BAT:%lu V:%u L:%u",
+        (unsigned long) battery.millivolts,
+        battery.valid, battery.low_latched);
     SSD1306_ShowString(6U, 0U, line);
     (void) SSD1306_Update();
 }

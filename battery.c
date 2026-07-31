@@ -4,7 +4,9 @@
 
 static Battery_State g_battery;
 static uint32_t g_last_sample_ms;
+static uint32_t g_last_valid_ms;
 static uint8_t g_low_count;
+static uint8_t g_recover_count;
 
 void Battery_Init(void)
 {
@@ -15,7 +17,9 @@ void Battery_Init(void)
     g_battery.valid = 0U;
     g_battery.low_latched = 0U;
     g_last_sample_ms = 0U;
+    g_last_valid_ms = 0U;
     g_low_count = 0U;
+    g_recover_count = 0U;
 }
 
 void Battery_Service(uint32_t now_ms)
@@ -39,7 +43,9 @@ void Battery_Service(uint32_t now_ms)
         timeout--;
     }
     if (timeout == 0U) {
-        g_battery.valid = 0U;
+        if ((uint32_t) (now_ms - g_last_valid_ms) > 500U) {
+            g_battery.valid = 0U;
+        }
         DL_ADC12_stopConversion(BAT_ADC_INST);
         DL_ADC12_enableConversions(BAT_ADC_INST);
         return;
@@ -64,11 +70,16 @@ void Battery_Service(uint32_t now_ms)
          scaled_mv >= APP_BATTERY_VALID_MIN_MV &&
          scaled_mv <= APP_BATTERY_VALID_MAX_MV) ? 1U : 0U;
 
+    if (g_battery.valid != 0U) {
+        g_last_valid_ms = now_ms;
+    }
+
     if (g_battery.configured == 0U || g_battery.valid == 0U) {
         return;
     }
 
     if (g_battery.millivolts < APP_BATTERY_LOW_MV) {
+        g_recover_count = 0U;
         if (g_low_count < 3U) {
             g_low_count++;
         }
@@ -77,6 +88,14 @@ void Battery_Service(uint32_t now_ms)
         }
     } else {
         g_low_count = 0U;
+        if (g_battery.millivolts >= APP_BATTERY_LOW_MV + 300UL) {
+            if (g_recover_count < 10U) {
+                g_recover_count++;
+            }
+            if (g_recover_count >= 10U) {
+                g_battery.low_latched = 0U;
+            }
+        }
     }
 }
 
@@ -88,6 +107,9 @@ Battery_State Battery_GetState(void)
 uint8_t Battery_IsSafe(void)
 {
     if (g_battery.configured == 0U || g_battery.valid == 0U) {
+        return 0U;
+    }
+    if (g_battery.millivolts < APP_BATTERY_LOW_MV) {
         return 0U;
     }
     return (g_battery.low_latched == 0U) ? 1U : 0U;
