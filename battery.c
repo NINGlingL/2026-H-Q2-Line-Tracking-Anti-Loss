@@ -56,6 +56,8 @@ void Battery_Service(uint32_t now_ms)
         (uint64_t) (APP_BATTERY_DIV_TOP_OHM + APP_BATTERY_DIV_BOTTOM_OHM);
     scaled_mv = (uint32_t) (scaled_numerator /
         (4095ULL * (uint64_t) APP_BATTERY_DIV_BOTTOM_OHM));
+    scaled_mv = (uint32_t) ((((uint64_t) scaled_mv *
+        (uint64_t) APP_BATTERY_CALIBRATION_PPM) + 500000ULL) / 1000000ULL);
     g_battery.millivolts = scaled_mv;
     g_battery.valid =
         (g_battery.raw > 8U && g_battery.raw < 4088U &&

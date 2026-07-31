@@ -28,6 +28,11 @@
  */
 #define APP_BATTERY_DIV_TOP_OHM        (100000UL)
 #define APP_BATTERY_DIV_BOTTOM_OHM     (10000UL)
+/*
+ * Per-vehicle calibration from the connected D153C:
+ * firmware 12.277 V versus meter 11.440 V on 2026-07-31.
+ */
+#define APP_BATTERY_CALIBRATION_PPM    (931824UL)
 #define APP_BATTERY_LOW_MV             (9900UL)
 #define APP_BATTERY_NOMINAL_MV         (11800UL)
 #define APP_BATTERY_VALID_MIN_MV       (7000UL)

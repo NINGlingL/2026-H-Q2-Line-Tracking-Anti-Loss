@@ -45,6 +45,19 @@ static uint8_t wait_idle(void)
     return 1U;
 }
 
+static uint8_t transfer_succeeded(void)
+{
+    uint32_t status;
+
+    if (wait_idle() == 0U) {
+        return 0U;
+    }
+    status = DL_I2C_getControllerStatus(IMU20948_INST);
+    return ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
+                       DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) == 0U) ?
+        1U : 0U;
+}
+
 static void recover_bus(void)
 {
     uint8_t pulse;
@@ -94,10 +107,13 @@ static uint8_t write_register(uint8_t reg, uint8_t value)
         recover_bus();
         return 0U;
     }
-    DL_I2C_fillControllerTXFIFO(IMU20948_INST, bytes, 2U);
+    DL_I2C_flushControllerTXFIFO(IMU20948_INST);
+    if (DL_I2C_fillControllerTXFIFO(IMU20948_INST, bytes, 2U) != 2U) {
+        return 0U;
+    }
     DL_I2C_startControllerTransfer(IMU20948_INST, g_address,
         DL_I2C_CONTROLLER_DIRECTION_TX, 2U);
-    if (wait_idle() == 0U) {
+    if (transfer_succeeded() == 0U) {
         recover_bus();
         return 0U;
     }
@@ -115,10 +131,13 @@ static uint8_t read_registers(uint8_t reg, uint8_t *data, uint8_t length)
         return 0U;
     }
 
-    DL_I2C_fillControllerTXFIFO(IMU20948_INST, &reg, 1U);
+    DL_I2C_flushControllerTXFIFO(IMU20948_INST);
+    if (DL_I2C_fillControllerTXFIFO(IMU20948_INST, &reg, 1U) != 1U) {
+        return 0U;
+    }
     DL_I2C_startControllerTransfer(IMU20948_INST, g_address,
         DL_I2C_CONTROLLER_DIRECTION_TX, 1U);
-    if (wait_idle() == 0U) {
+    if (transfer_succeeded() == 0U) {
         recover_bus();
         return 0U;
     }
@@ -137,7 +156,7 @@ static uint8_t read_registers(uint8_t reg, uint8_t *data, uint8_t length)
         }
         data[i] = DL_I2C_receiveControllerData(IMU20948_INST);
     }
-    if (wait_idle() == 0U) {
+    if (transfer_succeeded() == 0U) {
         recover_bus();
         return 0U;
     }

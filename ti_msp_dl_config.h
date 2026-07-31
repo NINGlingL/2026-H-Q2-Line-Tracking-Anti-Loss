@@ -119,7 +119,7 @@ extern "C" {
 #define OLED_INST                                                           I2C0
 #define OLED_INST_IRQHandler                                     I2C0_IRQHandler
 #define OLED_INST_INT_IRQN                                         I2C0_INT_IRQn
-#define OLED_BUS_SPEED_HZ                                                 400000
+#define OLED_BUS_SPEED_HZ                                                 100000
 #define GPIO_OLED_SDA_PORT                                                 GPIOA
 #define GPIO_OLED_SDA_PIN                                          DL_GPIO_PIN_0
 #define GPIO_OLED_IOMUX_SDA                                       (IOMUX_PINCM1)
@@ -133,7 +133,7 @@ extern "C" {
 #define IMU20948_INST                                                       I2C1
 #define IMU20948_INST_IRQHandler                                 I2C1_IRQHandler
 #define IMU20948_INST_INT_IRQN                                     I2C1_INT_IRQn
-#define IMU20948_BUS_SPEED_HZ                                             400000
+#define IMU20948_BUS_SPEED_HZ                                             100000
 #define GPIO_IMU20948_SDA_PORT                                             GPIOB
 #define GPIO_IMU20948_SDA_PIN                                      DL_GPIO_PIN_3
 #define GPIO_IMU20948_IOMUX_SDA                                  (IOMUX_PINCM16)

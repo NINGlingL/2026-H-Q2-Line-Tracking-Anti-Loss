@@ -292,8 +292,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_OLED_init(void) {
 
     /* Configure Controller Mode */
     DL_I2C_resetControllerTransfer(OLED_INST);
-    /* Set frequency to 400000 Hz*/
-    DL_I2C_setTimerPeriod(OLED_INST, 7);
+    /* Set frequency to 100000 Hz*/
+    DL_I2C_setTimerPeriod(OLED_INST, 31);
     DL_I2C_setControllerTXFIFOThreshold(OLED_INST, DL_I2C_TX_FIFO_LEVEL_EMPTY);
     DL_I2C_setControllerRXFIFOThreshold(OLED_INST, DL_I2C_RX_FIFO_LEVEL_BYTES_1);
     DL_I2C_enableControllerClockStretching(OLED_INST);
@@ -319,8 +319,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_IMU20948_init(void) {
 
     /* Configure Controller Mode */
     DL_I2C_resetControllerTransfer(IMU20948_INST);
-    /* Set frequency to 400000 Hz*/
-    DL_I2C_setTimerPeriod(IMU20948_INST, 7);
+    /* Set frequency to 100000 Hz*/
+    DL_I2C_setTimerPeriod(IMU20948_INST, 31);
     DL_I2C_setControllerTXFIFOThreshold(IMU20948_INST, DL_I2C_TX_FIFO_LEVEL_EMPTY);
     DL_I2C_setControllerRXFIFOThreshold(IMU20948_INST, DL_I2C_RX_FIFO_LEVEL_BYTES_1);
     DL_I2C_enableControllerClockStretching(IMU20948_INST);
