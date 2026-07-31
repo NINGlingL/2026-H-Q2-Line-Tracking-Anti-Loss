@@ -162,6 +162,7 @@ UART2.rxPinConfig.onlyInternalResistor = scripting.forceWrite(false);
 UART2.rxPinConfig.passedPeripheralType = scripting.forceWrite("Digital");
 
 WWDT1.$name               = "WWDT0";
+WWDT1.periodCount         = "15";
 WWDT1.sleepMode           = true;
 WWDT1.window0ClosedPeriod = "0";
 WWDT1.peripheral.$assign  = "WWDT0";
