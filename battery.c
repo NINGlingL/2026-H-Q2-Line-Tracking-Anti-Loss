@@ -55,6 +55,8 @@ void Battery_Service(uint32_t now_ms)
         (uint16_t) DL_ADC12_getMemResult(BAT_ADC_INST, BAT_ADC_ADCMEM_0);
     DL_ADC12_clearInterruptStatus(
         BAT_ADC_INST, DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
+    /* TI single-conversion sequence: stop, then re-arm ENC for next sample. */
+    DL_ADC12_stopConversion(BAT_ADC_INST);
     DL_ADC12_enableConversions(BAT_ADC_INST);
 
     scaled_numerator =
