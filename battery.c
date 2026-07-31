@@ -116,3 +116,16 @@ uint8_t Battery_IsSafe(void)
     }
     return (g_battery.low_latched == 0U) ? 1U : 0U;
 }
+
+uint8_t Battery_IsBenchSafe(void)
+{
+    if (g_battery.configured == 0U ||
+        g_battery.millivolts < APP_BATTERY_VALID_MIN_MV ||
+        g_battery.millivolts > APP_BATTERY_VALID_MAX_MV) {
+        return 0U;
+    }
+    if (g_battery.millivolts <= APP_BATTERY_LOW_MV) {
+        return 0U;
+    }
+    return (g_battery.low_latched == 0U) ? 1U : 0U;
+}

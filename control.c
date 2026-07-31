@@ -43,7 +43,8 @@ static int16_t apply_battery_feedforward(int16_t command)
     float gain;
     float compensated;
 
-    if (battery.valid == 0U || battery.millivolts == 0U) {
+    if (battery.millivolts < APP_BATTERY_VALID_MIN_MV ||
+        battery.millivolts > APP_BATTERY_VALID_MAX_MV) {
         return 0;
     }
     gain = (float) APP_BATTERY_NOMINAL_MV /
@@ -101,7 +102,7 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     }
 }
 
-static const char *motion_lock_reason(void)
+static const char *motion_lock_reason(uint8_t allow_last_sample)
 {
     Moto_State motor = Moto_GetState();
     Battery_State battery = Battery_GetState();
@@ -109,7 +110,9 @@ static const char *motion_lock_reason(void)
     if (motor.hardware_locked != 0U) {
         return "LOCK:HW";
     }
-    if (battery.configured == 0U || battery.valid == 0U) {
+    if (battery.configured == 0U ||
+        (battery.valid == 0U &&
+         (allow_last_sample == 0U || Battery_IsBenchSafe() == 0U))) {
         return "LOCK:BAT ADC";
     }
     if (battery.low_latched != 0U ||
@@ -121,7 +124,7 @@ static const char *motion_lock_reason(void)
 
 static void enter_diagnostic(uint32_t now_ms)
 {
-    const char *lock_reason = motion_lock_reason();
+    const char *lock_reason = motion_lock_reason(1U);
 
     if (lock_reason != NULL) {
         enter_safe(lock_reason, now_ms);
@@ -139,7 +142,7 @@ static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
     Encoder_State encoder = Encoder_GetState();
-    const char *lock_reason = motion_lock_reason();
+    const char *lock_reason = motion_lock_reason(0U);
 
     if (lock_reason != NULL) {
         enter_safe(lock_reason, now_ms);
@@ -411,7 +414,7 @@ static void run_diagnostic(uint32_t now_ms)
         enter_safe("DIAG TIMEOUT", now_ms);
         return;
     }
-    if (Battery_IsSafe() == 0U) {
+    if (Battery_IsBenchSafe() == 0U) {
         enter_safe("BAT FAULT", now_ms);
         return;
     }

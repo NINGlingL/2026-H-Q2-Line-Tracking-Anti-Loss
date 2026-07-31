@@ -15,5 +15,6 @@ void Battery_Init(void);
 void Battery_Service(uint32_t now_ms);
 Battery_State Battery_GetState(void);
 uint8_t Battery_IsSafe(void);
+uint8_t Battery_IsBenchSafe(void);
 
 #endif
