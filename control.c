@@ -18,6 +18,11 @@
 #define CURVE_BASE_PERCENT    (82.0f)
 #define CURVE_YAW_RATE_DPS    (12.0f)
 #define FINISH_BRAKE_HOLD_MS  (160UL)
+#define LAP_YAW_ARM_DEG       (330.0f)
+#define LAP_YAW_SLOW_DEG      (340.0f)
+#define LAP_YAW_NOMINAL_DEG   (360.0f)
+#define LAP_YAW_FALLBACK_DEG  (370.0f)
+#define FINISH_BASE_PERCENT   (65.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -36,8 +41,12 @@ static uint32_t g_line_lost_ms;
 static uint32_t g_marker_clear_ms;
 static uint32_t g_auto_elapsed_ms;
 static uint32_t g_finish_brake_start_ms;
+static float g_lap_yaw_accum_deg;
+static float g_lap_yaw_last_deg;
 static uint8_t g_start_marker_armed;
 static uint8_t g_finish_braking;
+static uint8_t g_lap_yaw_tracking;
+static uint8_t g_finish_yaw_armed;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
 static uint32_t g_button_change_ms;
@@ -102,6 +111,49 @@ static uint8_t start_marker_detected(const EightIR_State *ir)
      * hide the marker; a normal 1.8 cm guide line activates far fewer.
      */
     return (ir->active_count >= configured_marker_count()) ? 1U : 0U;
+}
+
+static uint8_t lap_yaw_is_usable(void)
+{
+    return (g_imu.valid != 0U && g_imu.stale == 0U &&
+            g_imu.calibrated != 0U && isfinite(g_imu.yaw_deg)) ? 1U : 0U;
+}
+
+static void update_lap_yaw(void)
+{
+    float delta;
+
+    if (lap_yaw_is_usable() == 0U) {
+        return;
+    }
+    if (g_lap_yaw_tracking == 0U) {
+        g_lap_yaw_last_deg = g_imu.yaw_deg;
+        g_lap_yaw_tracking = 1U;
+        return;
+    }
+
+    delta = g_imu.yaw_deg - g_lap_yaw_last_deg;
+    if (delta > 180.0f) {
+        delta -= 360.0f;
+    } else if (delta < -180.0f) {
+        delta += 360.0f;
+    }
+    g_lap_yaw_last_deg = g_imu.yaw_deg;
+
+    /* Reject a resumed/stale sample that cannot be a 20 ms vehicle turn. */
+    if (!isfinite(delta) || fabsf(delta) > 30.0f) {
+        return;
+    }
+    g_lap_yaw_accum_deg += delta;
+    if (!isfinite(g_lap_yaw_accum_deg)) {
+        g_lap_yaw_accum_deg = 0.0f;
+        g_lap_yaw_tracking = 0U;
+        g_finish_yaw_armed = 0U;
+        return;
+    }
+    if (fabsf(g_lap_yaw_accum_deg) >= LAP_YAW_ARM_DEG) {
+        g_finish_yaw_armed = 1U;
+    }
 }
 
 static void enter_safe(const char *reason, uint32_t now_ms)
@@ -176,7 +228,30 @@ static void enter_auto(uint32_t now_ms)
     g_start_marker_armed = 0U;
     g_finish_braking = 0U;
     g_finish_brake_start_ms = 0U;
+    g_lap_yaw_accum_deg = 0.0f;
+    g_finish_yaw_armed = 0U;
+    if (lap_yaw_is_usable() != 0U) {
+        g_lap_yaw_last_deg = g_imu.yaw_deg;
+        g_lap_yaw_tracking = 1U;
+    } else {
+        g_lap_yaw_last_deg = 0.0f;
+        g_lap_yaw_tracking = 0U;
+    }
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
+}
+
+static void begin_finish_brake(const char *label, uint32_t now_ms)
+{
+    g_control.lap_count = 1U;
+    g_control.left_command = 0;
+    g_control.right_command = 0;
+    g_finish_braking = 1U;
+    g_finish_brake_start_ms = now_ms;
+    PID_Reset(&g_line_pid);
+    PID_Reset(&g_speed_pid);
+    PID_Reset(&g_yaw_pid);
+    (void) snprintf(g_last_command, sizeof(g_last_command), "%s", label);
+    Moto_ActiveBrake();
 }
 
 static void set_manual_motion(
@@ -353,6 +428,7 @@ static void run_auto(uint32_t now_ms)
     int16_t right;
 
     g_auto_elapsed_ms = (uint32_t) (now_ms - g_control.mode_enter_ms);
+    update_lap_yaw();
 
     if (g_finish_braking != 0U) {
         uint32_t brake_elapsed_ms =
@@ -406,16 +482,14 @@ static void run_auto(uint32_t now_ms)
     } else if (g_auto_elapsed_ms >= g_control_tuning.marker_min_lap_ms &&
                start_marker_detected(&ir) != 0U) {
         /* Brake at the first valid marker frame instead of coasting past A. */
-        g_control.lap_count = 1U;
-        g_control.left_command = 0;
-        g_control.right_command = 0;
-        g_finish_braking = 1U;
-        g_finish_brake_start_ms = now_ms;
-        PID_Reset(&g_line_pid);
-        PID_Reset(&g_speed_pid);
-        PID_Reset(&g_yaw_pid);
-        (void) snprintf(g_last_command, sizeof(g_last_command), "LAP BRAKE");
-        Moto_ActiveBrake();
+        begin_finish_brake("LINE BRAKE", now_ms);
+        return;
+    }
+
+    if (g_start_marker_armed != 0U && g_finish_yaw_armed != 0U &&
+        fabsf(g_lap_yaw_accum_deg) >= LAP_YAW_FALLBACK_DEG) {
+        /* The gyro is a bounded fallback if the transverse marker is missed. */
+        begin_finish_brake("GYRO BRAKE", now_ms);
         return;
     }
 
@@ -460,6 +534,26 @@ static void run_auto(uint32_t now_ms)
         base += PID_Update(&g_speed_pid,
             effective_speed_target - speed_feedback, 0.010f);
     } else {
+        PID_Reset(&g_speed_pid);
+    }
+
+    if (g_finish_yaw_armed != 0U &&
+        fabsf(g_lap_yaw_accum_deg) >= LAP_YAW_SLOW_DEG) {
+        float yaw_progress = fabsf(g_lap_yaw_accum_deg);
+        float finish_ratio =
+            (yaw_progress - LAP_YAW_SLOW_DEG) /
+            (LAP_YAW_NOMINAL_DEG - LAP_YAW_SLOW_DEG);
+        float finish_percent;
+        float finish_base_limit;
+
+        if (finish_ratio > 1.0f) finish_ratio = 1.0f;
+        if (finish_ratio < 0.0f) finish_ratio = 0.0f;
+        finish_percent = CURVE_BASE_PERCENT -
+            (CURVE_BASE_PERCENT - FINISH_BASE_PERCENT) * finish_ratio;
+        finish_base_limit = configured_base * finish_percent / 100.0f;
+        if (base > finish_base_limit) {
+            base = finish_base_limit;
+        }
         PID_Reset(&g_speed_pid);
     }
 
@@ -525,6 +619,7 @@ static void draw_oled(void)
     uint8_t channel;
     int32_t yaw_tenths;
     uint32_t yaw_magnitude;
+    uint32_t lap_yaw_magnitude;
 
     bits[0] = 'S';
     bits[1] = 'T';
@@ -571,10 +666,12 @@ static void draw_oled(void)
     (void) snprintf(line, sizeof(line), "ENC:%ld S:%d V:%u",
         (long) encoder.total, encoder.speed_mm_s, encoder.valid);
     SSD1306_ShowString(6U, 0U, line);
-    (void) snprintf(line, sizeof(line), "T:%lu.%02lu A:%u L:%u",
+    lap_yaw_magnitude = (uint32_t) fabsf(g_lap_yaw_accum_deg);
+    (void) snprintf(line, sizeof(line), "T:%lu.%02lu Y:%lu%c L:%u",
         (unsigned long) (g_auto_elapsed_ms / 1000U),
         (unsigned long) ((g_auto_elapsed_ms % 1000U) / 10U),
-        g_start_marker_armed,
+        (unsigned long) lap_yaw_magnitude,
+        (g_finish_yaw_armed != 0U) ? '*' : '-',
         g_control.lap_count);
     SSD1306_ShowString(7U, 0U, line);
     (void) SSD1306_Update();
@@ -609,6 +706,10 @@ void Control_Init(uint32_t now_ms)
     g_last_oled_ms = now_ms;
     g_finish_braking = 0U;
     g_finish_brake_start_ms = 0U;
+    g_lap_yaw_accum_deg = 0.0f;
+    g_lap_yaw_last_deg = 0.0f;
+    g_lap_yaw_tracking = 0U;
+    g_finish_yaw_armed = 0U;
     g_last_oled_recovery_ms = now_ms;
     g_last_imu_ms = now_ms;
     g_imu_period_ms = IMU_PERIOD_MS;
