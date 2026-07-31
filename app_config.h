@@ -4,8 +4,8 @@
 /*
  * Hardware safety gate.
  *
- * Keep this at 0 until PA27 is connected to the motor supply through a
- * validated divider and the battery cutoff is configured.
+ * Keep this at 0 until the WHEELTEC D153C ADC output is connected directly
+ * to PA27 and the battery cutoff is configured.
  *
  * PB14 may connect directly to a genuine TB6612FNG STBY input because the
  * device datasheet specifies an internal 200 kOhm pull-down on STBY.
@@ -21,10 +21,12 @@
 #define APP_PWM_MAX_PERMILLE           (800)
 
 /*
- * Battery divider proposal: supply -- 39k -- PA27 -- 10k -- GND.
+ * WHEELTEC D153C onboard battery divider:
+ *   V1.0: 10k / 1k, V1.1: 100k / 10k; both produce VIN / 11.
+ * Connect the module ADC pin directly to PA27. Do not add another divider.
  * The low threshold remains zero until the pack series count is confirmed.
  */
-#define APP_BATTERY_DIV_TOP_OHM        (39000UL)
+#define APP_BATTERY_DIV_TOP_OHM        (100000UL)
 #define APP_BATTERY_DIV_BOTTOM_OHM     (10000UL)
 #define APP_BATTERY_LOW_MV             (0UL)
 #define APP_BATTERY_NOMINAL_MV         (12000UL)

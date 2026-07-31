@@ -21,6 +21,7 @@ void Battery_Init(void)
 void Battery_Service(uint32_t now_ms)
 {
     uint32_t scaled_mv;
+    uint64_t scaled_numerator;
     uint32_t timeout;
 
     if ((uint32_t) (now_ms - g_last_sample_ms) < 100U) {
@@ -50,9 +51,11 @@ void Battery_Service(uint32_t now_ms)
         BAT_ADC_INST, DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
     DL_ADC12_enableConversions(BAT_ADC_INST);
 
-    scaled_mv = ((uint32_t) g_battery.raw * 3300UL *
-                    (APP_BATTERY_DIV_TOP_OHM + APP_BATTERY_DIV_BOTTOM_OHM)) /
-                (4095UL * APP_BATTERY_DIV_BOTTOM_OHM);
+    scaled_numerator =
+        (uint64_t) g_battery.raw * 3300ULL *
+        (uint64_t) (APP_BATTERY_DIV_TOP_OHM + APP_BATTERY_DIV_BOTTOM_OHM);
+    scaled_mv = (uint32_t) (scaled_numerator /
+        (4095ULL * (uint64_t) APP_BATTERY_DIV_BOTTOM_OHM));
     g_battery.millivolts = scaled_mv;
     g_battery.valid = (g_battery.raw > 8U && g_battery.raw < 4088U) ? 1U : 0U;
 
