@@ -16,7 +16,6 @@
 #define AUTO_TIMEOUT_MS       (35000UL)
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
-#define ENCODER_START_TIMEOUT_MS (1500UL)
 #define YAW_RATE_PER_POSITION (5.0f)
 
 static Control_State g_control;
@@ -310,14 +309,6 @@ static void run_auto(uint32_t now_ms)
         return;
     }
     g_line_lost_ms = 0U;
-
-    /* Allow an open-loop launch, then require real right-wheel pulses. */
-    if ((uint32_t) (now_ms - g_control.mode_enter_ms) >=
-            ENCODER_START_TIMEOUT_MS &&
-        encoder.valid == 0U) {
-        enter_safe("ENC LOST", now_ms);
-        return;
-    }
 
     if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
         (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
