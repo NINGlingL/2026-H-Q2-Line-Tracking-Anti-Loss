@@ -113,7 +113,7 @@ static const char *motion_lock_reason(void)
         return "LOCK:BAT ADC";
     }
     if (battery.low_latched != 0U ||
-        battery.millivolts < APP_BATTERY_LOW_MV) {
+        battery.millivolts <= APP_BATTERY_LOW_MV) {
         return "LOCK:BAT LOW";
     }
     return NULL;

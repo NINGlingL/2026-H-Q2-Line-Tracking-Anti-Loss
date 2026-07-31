@@ -78,7 +78,7 @@ void Battery_Service(uint32_t now_ms)
         return;
     }
 
-    if (g_battery.millivolts < APP_BATTERY_LOW_MV) {
+    if (g_battery.millivolts <= APP_BATTERY_LOW_MV) {
         g_recover_count = 0U;
         if (g_low_count < 3U) {
             g_low_count++;
@@ -109,7 +109,7 @@ uint8_t Battery_IsSafe(void)
     if (g_battery.configured == 0U || g_battery.valid == 0U) {
         return 0U;
     }
-    if (g_battery.millivolts < APP_BATTERY_LOW_MV) {
+    if (g_battery.millivolts <= APP_BATTERY_LOW_MV) {
         return 0U;
     }
     return (g_battery.low_latched == 0U) ? 1U : 0U;
