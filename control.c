@@ -125,6 +125,7 @@ static void enter_diagnostic(uint32_t now_ms)
 static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
+    IMU_Data imu = ICM20948_GetLast();
 
     if (can_enable_motion() == 0U) {
         enter_safe("LOCK:HW/BAT", now_ms);
@@ -132,6 +133,15 @@ static void enter_auto(uint32_t now_ms)
     }
     if (ir.frame_fresh == 0U || ir.active_count == 0U) {
         enter_safe("AUTO:NO LINE", now_ms);
+        return;
+    }
+    if (imu.valid == 0U || imu.stale != 0U ||
+        (uint32_t) (now_ms - imu.timestamp_ms) > 100U) {
+        enter_safe("AUTO:IMU ERR", now_ms);
+        return;
+    }
+    if (imu.calibrated == 0U) {
+        enter_safe("AUTO:IMU CAL", now_ms);
         return;
     }
 
@@ -225,10 +235,16 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             EightIR_StartCalibrate();
             enter_safe("IR CAL", now_ms);
             break;
+        case 'G':
+        case 'g':
+            enter_safe("GYRO CAL", now_ms);
+            ICM20948_StartCalibration();
+            g_imu = ICM20948_GetLast();
+            break;
         case '?':
             UartBT_WriteStr(
                 "\r\nA:auto D:diag F/B/L/R S:stop +/-:power "
-                "I:IR-reverse C:IR-cal\r\n");
+                "I:IR-reverse C:IR-cal G:gyro-cal\r\n");
             break;
         default:
             break;
@@ -293,6 +309,12 @@ static void run_auto(uint32_t now_ms)
         enter_safe("IR STALE", now_ms);
         return;
     }
+    if (g_imu.valid == 0U || g_imu.stale != 0U ||
+        g_imu.calibrated == 0U ||
+        (uint32_t) (now_ms - g_imu.timestamp_ms) > 100U) {
+        enter_safe("IMU STALE", now_ms);
+        return;
+    }
 
     if (ir.active_count == 0U) {
         if (g_line_lost_ms == 0U) {
@@ -333,6 +355,7 @@ static void run_auto(uint32_t now_ms)
      * damping before confirming the mounted sign could steer the wrong way.
      */
     if (g_imu.valid != 0U && g_imu.stale == 0U &&
+        g_imu.calibrated != 0U &&
         fabsf((float) ir.position) >= 3.0f) {
         correction += 0.0f * g_imu.gz;
     }
@@ -375,7 +398,18 @@ static void draw_oled(uint32_t now_ms)
     Encoder_State enc = Encoder_GetState();
     Battery_State battery = Battery_GetState();
     Moto_State motor = Moto_GetState();
+    const char *imu_status;
     char line[22];
+
+    if (g_imu.valid == 0U) {
+        imu_status = "ERR";
+    } else if (g_imu.stale != 0U) {
+        imu_status = "STALE";
+    } else if (g_imu.calibrated == 0U) {
+        imu_status = "CAL";
+    } else {
+        imu_status = "OK";
+    }
 
     SSD1306_Clear();
     (void) snprintf(line, sizeof(line), "%s %s",
@@ -392,7 +426,7 @@ static void draw_oled(uint32_t now_ms)
     SSD1306_ShowString(2U, 0U, line);
 
     (void) snprintf(line, sizeof(line), "GZ:%d IMU:%s",
-        (int) g_imu.gz, g_imu.valid != 0U ? "OK" : "ERR");
+        (int) g_imu.gz, imu_status);
     SSD1306_ShowString(3U, 0U, line);
 
     (void) snprintf(line, sizeof(line), "L:%d R:%d",
