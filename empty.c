@@ -44,27 +44,35 @@
 
 /* ======================== 用户调车参数区 ======================== */
 const Control_Tuning g_control_tuning = {
-    .pwm_limit_permille       = 700,   /* 软件最高输出：700=70%，不要超过moto.c的70%硬限幅 */
-    .start_pwm_permille       = 220,   /* 起步输出：220=22%，觉得起步仍猛就减小，电机不动则增大 */
-    .start_ramp_ms            = 2000U, /* 软启动时间：用多少毫秒从起步输出平滑升到正常输出 */
-    .curve_pwm_permille       = 450,   /* 弯道基础速度：450=45% */
-    .straight_pwm_permille    = 550,   /* 直线基础速度：550=55% */
+    .pwm_limit_permille       = 300,   /* 6880a79最高输出：300=30%，moto.c也有30%硬限幅 */
+    .auto_base_pwm_permille   = 220,   /* 6880a79自动循迹固定基础速度：220=22% */
     .diagnostic_pwm_permille  = 200,   /* 手动诊断模式电机输出：200=20% */
-    .speed_target_mm_s        = 300,   /* 编码器有效时的目标速度：单位mm/s */
-    .line_kp                  = 7.0f,  /* 循迹比例P：越大转向越强，过大会左右摇摆 */
-    .line_ki                  = 0.2f,  /* 循迹积分I：修正长期偏差，过大会累积振荡 */
-    .line_kd                  = 0.04f, /* 循迹微分D：抑制快速偏转，过大会放大传感器跳变 */
-    .line_filter_alpha        = 0.25f, /* 循迹滤波：0~1，越小越平稳但转向响应越慢 */
-    .line_center_deadband     = 1.25f, /* 直线中心死区：增大可减轻摇摆，过大会降低修线灵敏度 */
+    .speed_target_mm_s        = 120,   /* 编码器有效时目标速度：120mm/s；无效时固定使用基础PWM */
+    .line_kp                  = 8.0f,  /* 6880a79八路循迹PID比例P */
+    .line_ki                  = 0.3f,  /* 6880a79八路循迹PID积分I */
+    .line_kd                  = 0.12f, /* 6880a79八路循迹PID微分D */
+    .line_integral_limit      = 20.0f, /* 循迹PID积分限幅 */
+    .line_output_limit        = 70.0f, /* 循迹PID输出限幅 */
+    .line_separation_error    = 4.0f,  /* 循迹PID积分分离误差 */
+    .speed_kp                 = 0.45f, /* 编码器速度PID比例P */
+    .speed_ki                 = 0.40f, /* 编码器速度PID积分I */
+    .speed_kd                 = 0.0f,  /* 编码器速度PID微分D */
+    .speed_integral_limit     = 150.0f,/* 编码器速度PID积分限幅 */
+    .speed_output_limit       = 140.0f,/* 编码器速度PID输出限幅 */
+    .speed_separation_error   = 200.0f,/* 编码器速度PID积分分离误差 */
     .yaw_kp                   = 0.8f,  /* 陀螺仪角速度辅助比例P */
     .yaw_ki                   = 0.02f, /* 陀螺仪角速度辅助积分I */
+    .yaw_kd                   = 0.0f,  /* 陀螺仪角速度辅助微分D */
+    .yaw_integral_limit       = 30.0f, /* 陀螺仪辅助PID积分限幅 */
+    .yaw_output_limit         = 30.0f, /* 陀螺仪辅助PID输出限幅 */
+    .yaw_separation_error     = 60.0f, /* 陀螺仪辅助PID积分分离误差 */
     .yaw_rate_per_position    = 5.0f,  /* 每单位循迹偏差对应的目标转向角速度 */
-    .straight_yaw_rate_dps    = 10.0f, /* 小于该角速度才判定为直线：单位度/秒 */
-    .marker_active_count      = 5U,    /* 启停线判定：同时检测黑线的最少传感器数量 */
+    .marker_active_count      = 5U,    /* 停车线判定：至少5路同时检测黑线，兼容中间六路 */
     .marker_clear_ms          = 80U,   /* 离开起点启停线的确认时间：单位ms */
     .marker_min_lap_ms        = 5000U, /* 启动后至少运行多久才允许识别终点：单位ms */
     .line_lost_stop_ms        = 50U,   /* 连续丢线多久后停车：单位ms */
-    .auto_timeout_ms          = 35000U /* 自动循迹最长运行时间：超时立即停车 */
+    .auto_timeout_ms          = 35000U,/* 自动循迹最长运行时间：超时立即停车 */
+    .diagnostic_timeout_ms    = 30000U /* 手动诊断模式最长运行时间：单位ms */
 };
 /* ====================== 用户调车参数区结束 ====================== */
 
