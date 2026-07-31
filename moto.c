@@ -125,6 +125,32 @@ void Moto_Stop(void)
     Moto_EmergencyStop();
 }
 
+void Moto_ActiveBrake(void)
+{
+    if ((g_motor.safety_permit == 0U) ||
+        (APP_MOTOR_HW_READY == 0U)) {
+        Moto_EmergencyStop();
+        return;
+    }
+
+    /*
+     * TB6612 short-brake truth table: STBY=H and IN1=IN2=H.  The PWM
+     * level is irrelevant in this state, so keep both PWM commands at zero
+     * while the two motor terminals are safely clamped together.
+     */
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_0_INDEX);
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_1_INDEX);
+    DL_GPIO_setPins(MOTO_PORT,
+        MOTO_AIN1_PIN | MOTO_AIN2_PIN | MOTO_BIN1_PIN | MOTO_BIN2_PIN);
+    DL_GPIO_setPins(STBY_PORT, STBY_STBY3_PIN);
+
+    g_motor.left_permille = 0;
+    g_motor.right_permille = 0;
+    g_motor.standby_enabled = 1U;
+}
+
 void Moto_EmergencyStop(void)
 {
     /* Minimal safe sequence: PWM zero, STBY low, direction pins low. */

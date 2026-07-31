@@ -17,6 +17,7 @@
 #define AUTO_START_RAMP_MS    (2000UL)
 #define CURVE_BASE_PERCENT    (82.0f)
 #define CURVE_YAW_RATE_DPS    (12.0f)
+#define FINISH_BRAKE_HOLD_MS  (160UL)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -34,7 +35,9 @@ static uint32_t g_imu_period_ms;
 static uint32_t g_line_lost_ms;
 static uint32_t g_marker_clear_ms;
 static uint32_t g_auto_elapsed_ms;
+static uint32_t g_finish_brake_start_ms;
 static uint8_t g_start_marker_armed;
+static uint8_t g_finish_braking;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
 static uint32_t g_button_change_ms;
@@ -103,6 +106,7 @@ static uint8_t start_marker_detected(const EightIR_State *ir)
 
 static void enter_safe(const char *reason, uint32_t now_ms)
 {
+    g_finish_braking = 0U;
     Moto_SetSafetyPermit(0U);
     Moto_EmergencyStop();
     PID_Reset(&g_line_pid);
@@ -170,6 +174,8 @@ static void enter_auto(uint32_t now_ms)
     g_marker_clear_ms = 0U;
     g_auto_elapsed_ms = 0U;
     g_start_marker_armed = 0U;
+    g_finish_braking = 0U;
+    g_finish_brake_start_ms = 0U;
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
 }
 
@@ -348,6 +354,18 @@ static void run_auto(uint32_t now_ms)
 
     g_auto_elapsed_ms = (uint32_t) (now_ms - g_control.mode_enter_ms);
 
+    if (g_finish_braking != 0U) {
+        uint32_t brake_elapsed_ms =
+            (uint32_t) (now_ms - g_finish_brake_start_ms);
+
+        if (brake_elapsed_ms >= FINISH_BRAKE_HOLD_MS) {
+            enter_safe("LAP DONE", now_ms);
+        } else {
+            Moto_ActiveBrake();
+        }
+        return;
+    }
+
     if (g_auto_elapsed_ms > g_control_tuning.auto_timeout_ms) {
         enter_safe("AUTO TIMEOUT", now_ms);
         return;
@@ -387,9 +405,17 @@ static void run_auto(uint32_t now_ms)
         }
     } else if (g_auto_elapsed_ms >= g_control_tuning.marker_min_lap_ms &&
                start_marker_detected(&ir) != 0U) {
-        /* One valid UART frame is enough; the narrow marker passes quickly. */
+        /* Brake at the first valid marker frame instead of coasting past A. */
         g_control.lap_count = 1U;
-        enter_safe("LAP DONE", now_ms);
+        g_control.left_command = 0;
+        g_control.right_command = 0;
+        g_finish_braking = 1U;
+        g_finish_brake_start_ms = now_ms;
+        PID_Reset(&g_line_pid);
+        PID_Reset(&g_speed_pid);
+        PID_Reset(&g_yaw_pid);
+        (void) snprintf(g_last_command, sizeof(g_last_command), "LAP BRAKE");
+        Moto_ActiveBrake();
         return;
     }
 
@@ -581,6 +607,8 @@ void Control_Init(uint32_t now_ms)
         g_control_tuning.diagnostic_pwm_permille);
     g_last_control_ms = now_ms;
     g_last_oled_ms = now_ms;
+    g_finish_braking = 0U;
+    g_finish_brake_start_ms = 0U;
     g_last_oled_recovery_ms = now_ms;
     g_last_imu_ms = now_ms;
     g_imu_period_ms = IMU_PERIOD_MS;
