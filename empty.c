@@ -31,6 +31,7 @@
  */
 
 #include "battery.h"
+#include "app_config.h"
 #include "control.h"
 #include "eight_ir.h"
 #include "encoder.h"

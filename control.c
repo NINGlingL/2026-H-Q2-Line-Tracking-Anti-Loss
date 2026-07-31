@@ -380,24 +380,15 @@ static void run_diagnostic(uint32_t now_ms)
         apply_battery_feedforward(g_manual_right));
 }
 
-static void draw_oled(uint32_t now_ms)
+static void draw_oled(void)
 {
     EightIR_State ir = EightIR_GetState();
-    const char *status;
     char bits[12];
     char track[12];
     char line[22];
     uint8_t channel;
-
-    if (ir.warming_up != 0U) {
-        status = "WARM";
-    } else if (ir.frame_fresh == 0U) {
-        status = "STALE";
-    } else if (ir.frame_valid == 0U) {
-        status = "ERR";
-    } else {
-        status = "OK";
-    }
+    int32_t yaw_tenths;
+    uint32_t yaw_magnitude;
 
     bits[0] = 'S';
     bits[1] = 'T';
@@ -417,14 +408,21 @@ static void draw_oled(uint32_t now_ms)
     SSD1306_ShowString(0U, 0U, "CH:12345678");
     SSD1306_ShowString(1U, 0U, bits);
     SSD1306_ShowString(2U, 0U, track);
-    if (((now_ms / 1000U) & 1U) == 0U) {
-        (void) snprintf(line, sizeof(line), "R:%02X P:%d N:%u %s",
-            ir.raw, ir.position, ir.active_count, status);
+    if (g_imu.valid == 0U || g_imu.stale != 0U) {
+        (void) snprintf(line, sizeof(line), "YAW:IMU ERR P:%d",
+            ir.position);
+    } else if (g_imu.calibrated == 0U) {
+        (void) snprintf(line, sizeof(line), "YAW:CAL %u/100",
+            g_imu.calibration_samples);
     } else {
-        (void) snprintf(line, sizeof(line), "F:%lu E:%lu O:%lu",
-            (unsigned long) ir.good_frames,
-            (unsigned long) ir.bad_frames,
-            (unsigned long) ir.overflow_bytes);
+        yaw_tenths = (int32_t) (g_imu.yaw_deg * 10.0f);
+        yaw_magnitude = (yaw_tenths < 0) ?
+            (uint32_t) -yaw_tenths : (uint32_t) yaw_tenths;
+        (void) snprintf(line, sizeof(line), "YAW:%c%lu.%lu P:%d N:%u",
+            (yaw_tenths < 0) ? '-' : '+',
+            (unsigned long) (yaw_magnitude / 10U),
+            (unsigned long) (yaw_magnitude % 10U),
+            ir.position, ir.active_count);
     }
     SSD1306_ShowString(3U, 0U, line);
     (void) SSD1306_Update();
@@ -488,7 +486,7 @@ void Control_Service(uint32_t now_ms)
 #if APP_ENABLE_OLED
     if ((uint32_t) (now_ms - g_last_oled_ms) >= OLED_PERIOD_MS) {
         g_last_oled_ms = now_ms;
-        draw_oled(now_ms);
+        draw_oled();
     }
     if (SSD1306_IsOnline() == 0U &&
         (uint32_t) (now_ms - g_last_oled_recovery_ms) >= 1000U) {

@@ -14,11 +14,14 @@ typedef struct {
     float gyro_bias_x;
     float gyro_bias_y;
     float gyro_bias_z;
+    float yaw_deg;
+    float yaw_rate_dps;
     uint8_t valid;
     uint8_t stale;
     uint8_t who_am_i;
     uint8_t i2c_address;
     uint8_t calibrated;
+    uint8_t stationary;
     uint16_t calibration_samples;
     uint32_t timestamp_ms;
     uint32_t failures;
