@@ -14,6 +14,9 @@
 
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
+#define AUTO_START_RAMP_MS    (2000UL)
+#define CURVE_BASE_PERCENT    (82.0f)
+#define CURVE_YAW_RATE_DPS    (12.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -331,9 +334,14 @@ static void run_auto(uint32_t now_ms)
     float correction;
     float yaw_assist = 0.0f;
     float desired_yaw_rate;
-    float base = (float) configured_pwm_value(
+    float configured_base = (float) configured_pwm_value(
         g_control_tuning.auto_base_pwm_permille);
+    float base;
+    float ramp_ratio = 1.0f;
+    float line_error;
+    float effective_speed_target;
     float speed_feedback;
+    uint8_t turning;
     int16_t output_limit = configured_pwm_limit();
     int16_t left;
     int16_t right;
@@ -385,33 +393,70 @@ static void run_auto(uint32_t now_ms)
         return;
     }
 
-    if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
-        (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
+    /*
+     * Start both wheels from zero for two seconds.  Scaling the steering at
+     * the same time prevents the car from twisting away from line A before
+     * it has acquired forward motion.
+     */
+    if (g_auto_elapsed_ms < AUTO_START_RAMP_MS) {
+        ramp_ratio = (float) g_auto_elapsed_ms /
+                     (float) AUTO_START_RAMP_MS;
+    }
+
+    /* A single one of the two centre detectors is still "centred". */
+    line_error = (float) ir.position;
+    if (fabsf(line_error) <= 1.0f) {
+        line_error = 0.0f;
+    }
+
+    turning = (fabsf(line_error) >= 2.0f) ? 1U : 0U;
+    if (g_imu.valid != 0U && g_imu.stale == 0U &&
+        g_imu.calibrated != 0U && isfinite(g_imu.yaw_rate_dps) &&
+        fabsf(g_imu.yaw_rate_dps) >= CURVE_YAW_RATE_DPS) {
+        turning = 1U;
+    }
+
+    base = configured_base * ramp_ratio;
+    if (turning != 0U) {
+        /*
+         * On this clockwise oval the encoded right wheel is the inner wheel
+         * in both semicircles.  Closing the speed loop there would increase
+         * the inner-wheel PWM and fight the requested turn, so curves use a
+         * slightly lower feed-forward speed instead.
+         */
+        base = configured_base * (CURVE_BASE_PERCENT / 100.0f) * ramp_ratio;
+        PID_Reset(&g_speed_pid);
+    } else if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
+               (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
         speed_feedback = fabsf((float) encoder.speed_mm_s);
+        effective_speed_target =
+            (float) g_control.speed_target_mm_s * ramp_ratio;
         base += PID_Update(&g_speed_pid,
-            (float) g_control.speed_target_mm_s - speed_feedback, 0.010f);
+            effective_speed_target - speed_feedback, 0.010f);
     } else {
         PID_Reset(&g_speed_pid);
     }
 
     correction =
-        PID_Update(&g_line_pid, (float) ir.position, 0.010f);
+        PID_Update(&g_line_pid, line_error, 0.010f);
 
     /*
      * The line position requests a turn rate. The filtered Z gyro closes a
      * second loop around that request, damping oscillation without relying
      * on the drifting absolute yaw angle.
      */
-    if (g_imu.valid != 0U && g_imu.stale == 0U &&
+    if (fabsf(line_error) >= 2.0f &&
+        g_imu.valid != 0U && g_imu.stale == 0U &&
         g_imu.calibrated != 0U && isfinite(g_imu.yaw_rate_dps)) {
         desired_yaw_rate =
-            (float) ir.position * g_control_tuning.yaw_rate_per_position;
+            line_error * g_control_tuning.yaw_rate_per_position;
         yaw_assist = PID_Update(&g_yaw_pid,
             desired_yaw_rate - g_imu.yaw_rate_dps, 0.010f);
     } else {
         PID_Reset(&g_yaw_pid);
     }
     correction += yaw_assist;
+    correction *= ramp_ratio;
     if (correction > (float) output_limit) {
         correction = (float) output_limit;
     }

@@ -9,7 +9,7 @@
 
 #define I2C_TO            ((CPUCLK_FREQ / 1000UL) * APP_I2C_TIMEOUT_MS)
 #define I2C_HALF_PERIOD   (CPUCLK_FREQ / 200000UL)
-#define OLED_LIVE_PAGES   (7U)
+#define OLED_LIVE_PAGES   (SSD1306_PAGES)
 #define OLED_PAGES_PER_UPDATE (3U)
 static uint8_t s_buf[SSD1306_PAGES][SSD1306_WIDTH];
 static uint8_t s_online;

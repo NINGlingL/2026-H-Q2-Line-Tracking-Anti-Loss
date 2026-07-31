@@ -46,7 +46,7 @@
 #define APP_BATTERY_VALID_MAX_MV       (13500UL)
 
 /* Eight-channel infrared module requires a warm-up after every power-up. */
-#define APP_IR_WARMUP_MS               (20000UL)
+#define APP_IR_WARMUP_MS               (1500UL)
 #define APP_IR_FRAME_TIMEOUT_MS        (150UL)
 
 /*

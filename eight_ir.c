@@ -5,6 +5,7 @@
 
 #define IR_RING_SIZE  (512U)
 #define IR_FRAME_SIZE (96U)
+#define IR_STREAM_RETRY_MS (500UL)
 
 static volatile uint8_t g_ring[IR_RING_SIZE];
 static volatile uint16_t g_write_index;
@@ -16,6 +17,7 @@ static uint8_t g_in_frame;
 static uint8_t g_stream_requested;
 static uint8_t g_reversed;
 static uint32_t g_start_ms;
+static uint32_t g_last_stream_request_ms;
 static EightIR_State g_state;
 
 static void uart_send(const char *text)
@@ -124,6 +126,7 @@ void EightIR_Init(uint32_t now_ms)
     g_stream_requested = 0U;
     g_reversed = APP_IR_REVERSED_DEFAULT;
     g_start_ms = now_ms;
+    g_last_stream_request_ms = now_ms;
     g_state.raw = 0xFFU;
     g_state.warming_up = 1U;
     for (i = 0U; i < 8U; i++) {
@@ -139,10 +142,19 @@ void EightIR_Init(uint32_t now_ms)
 
 void EightIR_Service(uint32_t now_ms)
 {
-    if (g_stream_requested == 0U &&
-        (uint32_t) (now_ms - g_start_ms) >= APP_IR_WARMUP_MS) {
+    /*
+     * Some modules ignore the first command while their onboard MCU is still
+     * starting.  Request digital streaming early, then retry until a valid
+     * frame arrives instead of making the whole car wait for a fixed 20 s.
+     */
+    if ((g_state.frame_valid == 0U || g_state.frame_fresh == 0U) &&
+        (uint32_t) (now_ms - g_start_ms) >= APP_IR_WARMUP_MS &&
+        (g_stream_requested == 0U ||
+         (uint32_t) (now_ms - g_last_stream_request_ms) >=
+             IR_STREAM_RETRY_MS)) {
         uart_send("$0,0,1#");
         g_stream_requested = 1U;
+        g_last_stream_request_ms = now_ms;
     }
 
     while (g_read_index != g_write_index) {
