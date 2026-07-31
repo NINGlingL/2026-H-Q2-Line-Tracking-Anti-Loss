@@ -13,6 +13,27 @@
 static uint8_t s_buf[SSD1306_PAGES][SSD1306_WIDTH];
 static uint8_t s_online;
 static uint8_t s_address = SSD1306_I2C_ADDR;
+static uint8_t s_next_page;
+static volatile uint32_t s_last_status;
+static volatile uint32_t s_error_count;
+
+static void configure_internal_pullups(void)
+{
+    /*
+     * The modules have no external pull-ups. Apply the MSPM0's weak IOMUX
+     * pull-ups after SysConfig so the open-drain bus can return high.
+     */
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SDA,
+        GPIO_OLED_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SCL,
+        GPIO_OLED_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SDA);
+    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SCL);
+}
 
 static uint8_t wait_idle(void)
 {
@@ -33,22 +54,27 @@ static uint8_t write_transfer(uint8_t *data, uint8_t length)
     uint32_t status;
 
     if (length == 0U || length > OLED_FIFO_BYTES || wait_idle() == 0U) {
+        s_error_count++;
         return 0U;
     }
     DL_I2C_flushControllerTXFIFO(OLED_INST);
     if (DL_I2C_fillControllerTXFIFO(OLED_INST, data, length) != length) {
+        s_error_count++;
         return 0U;
     }
     DL_I2C_startControllerTransfer(OLED_INST, s_address,
         DL_I2C_CONTROLLER_DIRECTION_TX, length);
     if (wait_idle() == 0U) {
         DL_I2C_resetControllerTransfer(OLED_INST);
+        s_error_count++;
         return 0U;
     }
     status = DL_I2C_getControllerStatus(OLED_INST);
+    s_last_status = status;
     if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
                    DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U) {
         DL_I2C_resetControllerTransfer(OLED_INST);
+        s_error_count++;
         return 0U;
     }
     return 1U;
@@ -64,25 +90,82 @@ static void _cmd(uint8_t cmd)
     }
 }
 
-static void write_data(const uint8_t *data, uint8_t length)
+static uint8_t write_data(const uint8_t *data, uint8_t length)
 {
     uint8_t tx[OLED_FIFO_BYTES];
-    uint8_t offset = 0U;
-    uint8_t chunk;
+    uint8_t initial;
+    uint8_t offset;
+    volatile uint32_t timeout;
+    uint32_t status;
 
     tx[0] = 0x40U;
-    while (offset < length && s_online != 0U) {
-        chunk = (uint8_t) (length - offset);
-        if (chunk > OLED_DATA_BYTES) {
-            chunk = OLED_DATA_BYTES;
-        }
-        memcpy(&tx[1], &data[offset], chunk);
-        if (write_transfer(tx, (uint8_t) (chunk + 1U)) == 0U) {
-            s_online = 0U;
-            return;
-        }
-        offset = (uint8_t) (offset + chunk);
+    initial = length;
+    if (initial > OLED_DATA_BYTES) {
+        initial = OLED_DATA_BYTES;
     }
+    memcpy(&tx[1], data, initial);
+
+    if (wait_idle() == 0U) {
+        s_error_count++;
+        return 0U;
+    }
+    DL_I2C_flushControllerTXFIFO(OLED_INST);
+    if (DL_I2C_fillControllerTXFIFO(
+            OLED_INST, tx, (uint16_t) initial + 1U) !=
+        (uint16_t) initial + 1U) {
+        s_error_count++;
+        return 0U;
+    }
+    DL_I2C_startControllerTransfer(OLED_INST, s_address,
+        DL_I2C_CONTROLLER_DIRECTION_TX, (uint16_t) length + 1U);
+
+    offset = initial;
+    while (offset < length) {
+        timeout = I2C_TO;
+        while (DL_I2C_isControllerTXFIFOFull(OLED_INST)) {
+            status = DL_I2C_getControllerStatus(OLED_INST);
+            if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
+                           DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U ||
+                timeout == 0U) {
+                s_last_status = status;
+                s_error_count++;
+                DL_I2C_resetControllerTransfer(OLED_INST);
+                return 0U;
+            }
+            timeout--;
+        }
+        DL_I2C_transmitControllerData(OLED_INST, data[offset]);
+        offset++;
+    }
+    if (wait_idle() == 0U) {
+        s_error_count++;
+        DL_I2C_resetControllerTransfer(OLED_INST);
+        return 0U;
+    }
+    status = DL_I2C_getControllerStatus(OLED_INST);
+    s_last_status = status;
+    if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
+                   DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U) {
+        s_error_count++;
+        DL_I2C_resetControllerTransfer(OLED_INST);
+        return 0U;
+    }
+    return 1U;
+}
+
+static uint8_t write_page(uint8_t page)
+{
+    _cmd((uint8_t) (0xB0U + page));
+    _cmd(0x00U);
+    _cmd(0x10U);
+    if (s_online == 0U) {
+        return 0U;
+    }
+    if (write_data(s_buf[page], SSD1306_WIDTH) == 0U) {
+        s_online = 0U;
+        return 0U;
+    }
+    return 1U;
 }
 
 /* ── 写入多字节 (寄存器地址 + 数据) ── */
@@ -98,15 +181,19 @@ uint8_t SSD1306_Init(void)
 {
     static const uint8_t cmds[] = {
         0xAEU, 0xD5U, 0x80U, 0xA8U, 0x3FU, 0xD3U, 0x00U, 0x40U,
-        0x8DU, 0x14U, 0x20U, 0x00U, 0xA1U, 0xC8U, 0xDAU, 0x12U,
-        0x81U, 0xCFU, 0xD9U, 0xF1U, 0xDBU, 0x40U, 0xA4U, 0xA6U,
-        0xAFU
+        0x8DU, 0x14U, 0x20U, 0x02U, 0xA1U, 0xC8U, 0xDAU, 0x12U,
+        0x81U, 0x7FU, 0xD9U, 0xF1U, 0xDBU, 0x40U, 0xA4U, 0xA6U,
+        0x2EU, 0xAFU
     };
     static const uint8_t addresses[] = {SSD1306_I2C_ADDR, 0x3DU};
     uint8_t address_index;
     uint8_t command_index;
 
-    delay_cycles(CPUCLK_FREQ / 50U);
+    configure_internal_pullups();
+    s_last_status = 0U;
+    s_error_count = 0U;
+    s_next_page = 0U;
+    delay_cycles(CPUCLK_FREQ / 10U);
     for (address_index = 0U;
          address_index < (uint8_t) sizeof(addresses);
          address_index++) {
@@ -122,7 +209,14 @@ uint8_t SSD1306_Init(void)
         }
         if (s_online != 0U) {
             SSD1306_Clear();
-            (void) SSD1306_Update();
+            for (command_index = 0U;
+                 command_index < SSD1306_PAGES;
+                 command_index++) {
+                if (write_page(command_index) == 0U) {
+                    break;
+                }
+            }
+            s_next_page = 0U;
             return s_online;
         }
     }
@@ -135,10 +229,11 @@ void SSD1306_Clear(void) { memset(s_buf, 0, sizeof(s_buf)); }
 uint8_t SSD1306_Update(void)
 {
     if (s_online == 0U) return 0U;
-    for (uint8_t p = 0; p < SSD1306_PAGES; p++) {
-        _cmd(0xB0 + p); _cmd(0x00); _cmd(0x10);
-        write_data(s_buf[p], SSD1306_WIDTH);
-        if (s_online == 0U) break;
+    if (write_page(s_next_page) != 0U) {
+        s_next_page++;
+        if (s_next_page >= SSD1306_PAGES) {
+            s_next_page = 0U;
+        }
     }
     return s_online;
 }
@@ -174,11 +269,11 @@ uint8_t SSD1306_TryRecover(void)
 
     DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SDA,
         GPIO_OLED_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
         DL_GPIO_WAKEUP_DISABLE);
     DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SCL,
         GPIO_OLED_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
         DL_GPIO_WAKEUP_DISABLE);
     DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SDA);
     DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SCL);

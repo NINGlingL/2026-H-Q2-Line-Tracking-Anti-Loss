@@ -32,6 +32,20 @@ static float g_cal_sum_x;
 static float g_cal_sum_y;
 static float g_cal_sum_z;
 
+static void configure_internal_pullups(void)
+{
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_IMU20948_IOMUX_SDA,
+        GPIO_IMU20948_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_IMU20948_IOMUX_SCL,
+        GPIO_IMU20948_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_enableHiZ(GPIO_IMU20948_IOMUX_SDA);
+    DL_GPIO_enableHiZ(GPIO_IMU20948_IOMUX_SCL);
+}
+
 static uint8_t wait_idle(void)
 {
     uint32_t timeout = I2C_TIMEOUT_LOOPS;
@@ -88,11 +102,11 @@ static void recover_bus(void)
 
     DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_IMU20948_IOMUX_SDA,
         GPIO_IMU20948_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
         DL_GPIO_WAKEUP_DISABLE);
     DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_IMU20948_IOMUX_SCL,
         GPIO_IMU20948_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
         DL_GPIO_WAKEUP_DISABLE);
     DL_GPIO_enableHiZ(GPIO_IMU20948_IOMUX_SDA);
     DL_GPIO_enableHiZ(GPIO_IMU20948_IOMUX_SCL);
@@ -189,6 +203,7 @@ uint8_t ICM20948_Init(void)
     uint8_t who = 0U;
 
     memset(&g_last, 0, sizeof(g_last));
+    configure_internal_pullups();
 
     for (address_index = 0U; address_index < 2U; address_index++) {
         g_address = addresses[address_index];
