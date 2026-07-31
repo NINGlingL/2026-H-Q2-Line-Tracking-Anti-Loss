@@ -23,9 +23,9 @@ static void set_right_direction(int16_t command)
 {
     DL_GPIO_clearPins(MOTO_PORT, MOTO_AIN1_PIN | MOTO_AIN2_PIN);
     if (command > 0) {
-        DL_GPIO_setPins(MOTO_PORT, MOTO_AIN1_PIN);
-    } else if (command < 0) {
         DL_GPIO_setPins(MOTO_PORT, MOTO_AIN2_PIN);
+    } else if (command < 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_AIN1_PIN);
     }
 }
 
@@ -33,9 +33,9 @@ static void set_left_direction(int16_t command)
 {
     DL_GPIO_clearPins(MOTO_PORT, MOTO_BIN1_PIN | MOTO_BIN2_PIN);
     if (command > 0) {
-        DL_GPIO_setPins(MOTO_PORT, MOTO_BIN1_PIN);
-    } else if (command < 0) {
         DL_GPIO_setPins(MOTO_PORT, MOTO_BIN2_PIN);
+    } else if (command < 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_BIN1_PIN);
     }
 }
 
