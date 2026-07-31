@@ -125,7 +125,6 @@ static void enter_diagnostic(uint32_t now_ms)
 static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
-    IMU_Data imu = ICM20948_GetLast();
     Encoder_State encoder = Encoder_GetState();
 
     if (can_enable_motion() == 0U) {
@@ -134,15 +133,6 @@ static void enter_auto(uint32_t now_ms)
     }
     if (ir.frame_fresh == 0U || ir.active_count == 0U) {
         enter_safe("AUTO:NO LINE", now_ms);
-        return;
-    }
-    if (imu.valid == 0U || imu.stale != 0U ||
-        (uint32_t) (now_ms - imu.timestamp_ms) > 100U) {
-        enter_safe("AUTO:IMU ERR", now_ms);
-        return;
-    }
-    if (imu.calibrated == 0U) {
-        enter_safe("AUTO:IMU CAL", now_ms);
         return;
     }
     if (encoder.valid == 0U ||
@@ -243,9 +233,13 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
             break;
         case 'G':
         case 'g':
+#if APP_ENABLE_IMU
             enter_safe("GYRO CAL", now_ms);
             ICM20948_StartCalibration();
             g_imu = ICM20948_GetLast();
+#else
+            (void) snprintf(g_last_command, sizeof(g_last_command), "IMU OFF");
+#endif
             break;
         case '?':
             UartBT_WriteStr(
@@ -315,12 +309,6 @@ static void run_auto(uint32_t now_ms)
         enter_safe("IR STALE", now_ms);
         return;
     }
-    if (g_imu.valid == 0U || g_imu.stale != 0U ||
-        g_imu.calibrated == 0U ||
-        (uint32_t) (now_ms - g_imu.timestamp_ms) > 100U) {
-        enter_safe("IMU STALE", now_ms);
-        return;
-    }
     if (encoder.valid == 0U ||
         (uint32_t) (now_ms - encoder.sample_ms) > 30U) {
         enter_safe("ENC FAULT", now_ms);
@@ -359,17 +347,6 @@ static void run_auto(uint32_t now_ms)
 
     correction =
         PID_Update(&g_line_pid, (float) ir.position, 0.010f);
-
-    /*
-     * IMU Z rate is collected and shown for sign verification. Its gain is
-     * intentionally zero in this hardware-locked build; enabling turn-rate
-     * damping before confirming the mounted sign could steer the wrong way.
-     */
-    if (g_imu.valid != 0U && g_imu.stale == 0U &&
-        g_imu.calibrated != 0U &&
-        fabsf((float) ir.position) >= 3.0f) {
-        correction += 0.0f * g_imu.gz;
-    }
 
     left = (int16_t) (base + correction);
     right = (int16_t) (base - correction);
@@ -491,6 +468,7 @@ void Control_Service(uint32_t now_ms)
     service_bluetooth(now_ms);
     service_button(now_ms);
 
+#if APP_ENABLE_IMU
     if ((uint32_t) (now_ms - g_last_imu_ms) >= g_imu_period_ms) {
         g_last_imu_ms = now_ms;
         if (ICM20948_Read(&g_imu, now_ms) != 0U) {
@@ -499,6 +477,7 @@ void Control_Service(uint32_t now_ms)
             g_imu_period_ms = 500U;
         }
     }
+#endif
 
     if ((uint32_t) (now_ms - g_last_control_ms) >=
         APP_CONTROL_PERIOD_MS) {
@@ -513,6 +492,7 @@ void Control_Service(uint32_t now_ms)
         }
     }
 
+#if APP_ENABLE_OLED
     if ((uint32_t) (now_ms - g_last_oled_ms) >= OLED_PERIOD_MS) {
         g_last_oled_ms = now_ms;
         draw_oled(now_ms);
@@ -522,6 +502,7 @@ void Control_Service(uint32_t now_ms)
         g_last_oled_recovery_ms = now_ms;
         (void) SSD1306_TryRecover();
     }
+#endif
 }
 
 Control_State Control_GetState(void)

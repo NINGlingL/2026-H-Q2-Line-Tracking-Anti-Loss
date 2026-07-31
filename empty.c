@@ -52,8 +52,12 @@ int main(void)
     Encoder_Init();
     UartBT_Init();
     EightIR_Init(Timebase_Millis());
+#if APP_ENABLE_IMU
     (void) ICM20948_Init();
+#endif
+#if APP_ENABLE_OLED
     (void) SSD1306_Init();
+#endif
     Control_Init(Timebase_Millis());
 
     while (1) {

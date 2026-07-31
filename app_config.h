@@ -13,7 +13,14 @@
  * The firmware still builds and all sensors/diagnostics run while locked,
  * but Moto_SetLR() cannot raise STBY.
  */
-#define APP_MOTOR_HW_READY             (0U)
+#define APP_MOTOR_HW_READY             (1U)
+
+/*
+ * First running version: line sensor + right encoder only.
+ * OLED and IMU remain in the project but cannot block motion.
+ */
+#define APP_ENABLE_OLED                (0U)
+#define APP_ENABLE_IMU                 (0U)
 
 /* User-confirmed timing and actuator limits. */
 #define APP_CONTROL_PERIOD_MS          (10U)
