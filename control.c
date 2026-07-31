@@ -126,6 +126,7 @@ static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
     IMU_Data imu = ICM20948_GetLast();
+    Encoder_State encoder = Encoder_GetState();
 
     if (can_enable_motion() == 0U) {
         enter_safe("LOCK:HW/BAT", now_ms);
@@ -142,6 +143,11 @@ static void enter_auto(uint32_t now_ms)
     }
     if (imu.calibrated == 0U) {
         enter_safe("AUTO:IMU CAL", now_ms);
+        return;
+    }
+    if (encoder.valid == 0U ||
+        (uint32_t) (now_ms - encoder.sample_ms) > 30U) {
+        enter_safe("AUTO:ENC ERR", now_ms);
         return;
     }
 
@@ -315,6 +321,11 @@ static void run_auto(uint32_t now_ms)
         enter_safe("IMU STALE", now_ms);
         return;
     }
+    if (encoder.valid == 0U ||
+        (uint32_t) (now_ms - encoder.sample_ms) > 30U) {
+        enter_safe("ENC FAULT", now_ms);
+        return;
+    }
 
     if (ir.active_count == 0U) {
         if (g_line_lost_ms == 0U) {
@@ -340,10 +351,10 @@ static void run_auto(uint32_t now_ms)
         }
     }
 
-    if (g_control.encoder_target > 0 && encoder.valid != 0U) {
-        speed_feedback = fabsf((float) encoder.delta);
+    if (g_control.speed_target_mm_s > 0) {
+        speed_feedback = fabsf((float) encoder.speed_mm_s);
         base += PID_Update(&g_speed_pid,
-            (float) g_control.encoder_target - speed_feedback, 0.010f);
+            (float) g_control.speed_target_mm_s - speed_feedback, 0.010f);
     }
 
     correction =
@@ -421,8 +432,8 @@ static void draw_oled(uint32_t now_ms)
         ir.raw, ir.position, ir.active_count);
     SSD1306_ShowString(1U, 0U, line);
 
-    (void) snprintf(line, sizeof(line), "ENC:%d T:%ld",
-        enc.delta, (long) enc.total);
+    (void) snprintf(line, sizeof(line), "ENC:%d V:%d",
+        enc.delta, enc.speed_mm_s);
     SSD1306_ShowString(2U, 0U, line);
 
     (void) snprintf(line, sizeof(line), "GZ:%d IMU:%s",
@@ -455,10 +466,10 @@ void Control_Init(uint32_t now_ms)
     memset(&g_imu, 0, sizeof(g_imu));
     PID_Init(&g_line_pid, 38.0f, 1.0f, 0.8f,
         30.0f, 260.0f, 4.0f);
-    PID_Init(&g_speed_pid, 4.0f, 0.8f, 0.0f,
-        100.0f, 180.0f, 50.0f);
+    PID_Init(&g_speed_pid, 0.6f, 0.25f, 0.0f,
+        200.0f, 180.0f, 150.0f);
     g_control.mode = CONTROL_SAFE;
-    g_control.encoder_target = APP_ENCODER_TARGET_PER_TICK;
+    g_control.speed_target_mm_s = APP_AUTO_TARGET_SPEED_MM_S;
     g_control.hardware_locked = (APP_MOTOR_HW_READY == 0U) ? 1U : 0U;
     g_control.mode_enter_ms = now_ms;
     g_diag_power = APP_DIAG_PWM_PERMILLE;

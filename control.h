@@ -14,7 +14,7 @@ typedef struct {
     Control_Mode mode;
     int16_t left_command;
     int16_t right_command;
-    int16_t encoder_target;
+    int16_t speed_target_mm_s;
     uint8_t lap_count;
     uint8_t hardware_locked;
     uint32_t mode_enter_ms;

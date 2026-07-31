@@ -4,8 +4,8 @@
 /*
  * Hardware safety gate.
  *
- * Keep this at 0 until the WHEELTEC D153C ADC output is connected directly
- * to PA27 and the battery cutoff is configured.
+ * Keep this at 0 until the WHEELTEC D153C ADC output is confirmed connected
+ * directly to PA27 and the displayed voltage is checked against a meter.
  *
  * PB14 may connect directly to a genuine TB6612FNG STBY input because the
  * device datasheet specifies an internal 200 kOhm pull-down on STBY.
@@ -28,8 +28,10 @@
  */
 #define APP_BATTERY_DIV_TOP_OHM        (100000UL)
 #define APP_BATTERY_DIV_BOTTOM_OHM     (10000UL)
-#define APP_BATTERY_LOW_MV             (0UL)
-#define APP_BATTERY_NOMINAL_MV         (12000UL)
+#define APP_BATTERY_LOW_MV             (9900UL)
+#define APP_BATTERY_NOMINAL_MV         (11800UL)
+#define APP_BATTERY_VALID_MIN_MV       (7000UL)
+#define APP_BATTERY_VALID_MAX_MV       (13500UL)
 
 /* Eight-channel infrared module requires a warm-up after every power-up. */
 #define APP_IR_WARMUP_MS               (20000UL)
@@ -38,7 +40,21 @@
 /* Conservative first bench-test values, tunable through Bluetooth. */
 #define APP_DIAG_PWM_PERMILLE          (250)
 #define APP_AUTO_BASE_PWM_PERMILLE     (300)
-#define APP_ENCODER_TARGET_PER_TICK    (0)
+
+/*
+ * User-confirmed MG513XP28_12V with Hall encoder and 65 mm wheel:
+ *   13 PPR * 28:1 gearbox * 4x quadrature = 1456 counts/wheel revolution.
+ * The first closed-loop target is deliberately limited to 0.25 m/s.
+ */
+#define APP_MOTOR_GEAR_RATIO           (28UL)
+#define APP_ENCODER_PPR                (13UL)
+#define APP_ENCODER_QUADRATURE         (4UL)
+#define APP_ENCODER_COUNTS_PER_REV     \
+    (APP_MOTOR_GEAR_RATIO * APP_ENCODER_PPR * APP_ENCODER_QUADRATURE)
+#define APP_WHEEL_DIAMETER_MM          (65UL)
+#define APP_WHEEL_CIRCUMFERENCE_UM     (204204UL)
+#define APP_MOTOR_MAX_VALID_RPM        (500UL)
+#define APP_AUTO_TARGET_SPEED_MM_S     (250)
 
 /* x1-left is provisional; Bluetooth command "IRREV 1" reverses it. */
 #define APP_IR_REVERSED_DEFAULT        (0U)
