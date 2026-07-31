@@ -7,40 +7,62 @@
 #include "ti_msp_dl_config.h"
 #include <string.h>
 
-#define I2C_TO  ((CPUCLK_FREQ / 1000UL) * APP_I2C_TIMEOUT_MS)
-#define OLED_FIFO_BYTES  (8U)
-#define OLED_DATA_BYTES  (OLED_FIFO_BYTES - 1U)
+#define I2C_TO            ((CPUCLK_FREQ / 1000UL) * APP_I2C_TIMEOUT_MS)
+#define I2C_HALF_PERIOD   (CPUCLK_FREQ / 200000UL)
+#define OLED_LIVE_PAGES   (4U)
 static uint8_t s_buf[SSD1306_PAGES][SSD1306_WIDTH];
 static uint8_t s_online;
 static uint8_t s_address = SSD1306_I2C_ADDR;
-static uint8_t s_next_page;
-static volatile uint32_t s_last_status;
 static volatile uint32_t s_error_count;
 
-static void configure_internal_pullups(void)
+static void i2c_delay(void)
 {
-    /*
-     * The modules have no external pull-ups. Apply the MSPM0's weak IOMUX
-     * pull-ups after SysConfig so the open-drain bus can return high.
-     */
-    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SDA,
-        GPIO_OLED_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
-        DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SCL,
-        GPIO_OLED_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
-        DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SDA);
-    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SCL);
+    delay_cycles(I2C_HALF_PERIOD);
 }
 
-static uint8_t wait_idle(void)
+static void sda_low(void)
+{
+    DL_GPIO_clearPins(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN);
+    DL_GPIO_enableOutput(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN);
+}
+
+static void sda_release(void)
+{
+    DL_GPIO_disableOutput(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN);
+}
+
+static void scl_low(void)
+{
+    DL_GPIO_clearPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+    DL_GPIO_enableOutput(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+}
+
+static void scl_release(void)
+{
+    DL_GPIO_disableOutput(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+}
+
+static void configure_gpio_i2c(void)
+{
+    DL_I2C_disableController(OLED_INST);
+    DL_GPIO_initDigitalInputFeatures(GPIO_OLED_IOMUX_SDA,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initDigitalInputFeatures(GPIO_OLED_IOMUX_SCL,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_clearPins(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN);
+    DL_GPIO_clearPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+    sda_release();
+    scl_release();
+}
+
+static uint8_t wait_scl_high(void)
 {
     volatile uint32_t to = I2C_TO;
 
-    while ((DL_I2C_getControllerStatus(OLED_INST) &
-            DL_I2C_CONTROLLER_STATUS_IDLE) == 0U) {
+    scl_release();
+    while (DL_GPIO_readPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN) == 0U) {
         if (to == 0U) {
             return 0U;
         }
@@ -49,34 +71,83 @@ static uint8_t wait_idle(void)
     return 1U;
 }
 
-static uint8_t write_transfer(uint8_t *data, uint8_t length)
+static uint8_t i2c_start(void)
 {
-    uint32_t status;
+    sda_release();
+    if (wait_scl_high() == 0U) {
+        return 0U;
+    }
+    i2c_delay();
+    if (DL_GPIO_readPins(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN) == 0U) {
+        return 0U;
+    }
+    sda_low();
+    i2c_delay();
+    scl_low();
+    return 1U;
+}
 
-    if (length == 0U || length > OLED_FIFO_BYTES || wait_idle() == 0U) {
+static void i2c_stop(void)
+{
+    sda_low();
+    i2c_delay();
+    (void) wait_scl_high();
+    i2c_delay();
+    sda_release();
+    i2c_delay();
+}
+
+static uint8_t i2c_write_byte(uint8_t value)
+{
+    uint8_t bit;
+    uint8_t ack;
+
+    for (bit = 0U; bit < 8U; bit++) {
+        if ((value & 0x80U) != 0U) {
+            sda_release();
+        } else {
+            sda_low();
+        }
+        i2c_delay();
+        if (wait_scl_high() == 0U) {
+            scl_low();
+            return 0U;
+        }
+        i2c_delay();
+        scl_low();
+        value <<= 1U;
+    }
+    sda_release();
+    i2c_delay();
+    if (wait_scl_high() == 0U) {
+        scl_low();
+        return 0U;
+    }
+    ack = (DL_GPIO_readPins(GPIO_OLED_SDA_PORT, GPIO_OLED_SDA_PIN) == 0U) ?
+        1U : 0U;
+    i2c_delay();
+    scl_low();
+    return ack;
+}
+
+static uint8_t write_transfer(const uint8_t *data, uint8_t length)
+{
+    uint8_t index;
+
+    if (length == 0U || i2c_start() == 0U ||
+        i2c_write_byte((uint8_t) (s_address << 1U)) == 0U) {
+        i2c_stop();
         s_error_count++;
         return 0U;
     }
-    DL_I2C_flushControllerTXFIFO(OLED_INST);
-    if (DL_I2C_fillControllerTXFIFO(OLED_INST, data, length) != length) {
-        s_error_count++;
-        return 0U;
+    for (index = 0U; index < length; index++) {
+        if (i2c_write_byte(data[index]) == 0U) {
+            i2c_stop();
+            s_error_count++;
+            return 0U;
+        }
     }
-    DL_I2C_startControllerTransfer(OLED_INST, s_address,
-        DL_I2C_CONTROLLER_DIRECTION_TX, length);
-    if (wait_idle() == 0U) {
-        DL_I2C_resetControllerTransfer(OLED_INST);
-        s_error_count++;
-        return 0U;
-    }
-    status = DL_I2C_getControllerStatus(OLED_INST);
-    s_last_status = status;
-    if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
-                   DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U) {
-        DL_I2C_resetControllerTransfer(OLED_INST);
-        s_error_count++;
-        return 0U;
-    }
+    i2c_stop();
     return 1U;
 }
 
@@ -92,64 +163,23 @@ static void _cmd(uint8_t cmd)
 
 static uint8_t write_data(const uint8_t *data, uint8_t length)
 {
-    uint8_t tx[OLED_FIFO_BYTES];
-    uint8_t initial;
-    uint8_t offset;
-    volatile uint32_t timeout;
-    uint32_t status;
+    uint8_t index;
 
-    tx[0] = 0x40U;
-    initial = length;
-    if (initial > OLED_DATA_BYTES) {
-        initial = OLED_DATA_BYTES;
-    }
-    memcpy(&tx[1], data, initial);
-
-    if (wait_idle() == 0U) {
+    if (i2c_start() == 0U ||
+        i2c_write_byte((uint8_t) (s_address << 1U)) == 0U ||
+        i2c_write_byte(0x40U) == 0U) {
+        i2c_stop();
         s_error_count++;
         return 0U;
     }
-    DL_I2C_flushControllerTXFIFO(OLED_INST);
-    if (DL_I2C_fillControllerTXFIFO(
-            OLED_INST, tx, (uint16_t) initial + 1U) !=
-        (uint16_t) initial + 1U) {
-        s_error_count++;
-        return 0U;
-    }
-    DL_I2C_startControllerTransfer(OLED_INST, s_address,
-        DL_I2C_CONTROLLER_DIRECTION_TX, (uint16_t) length + 1U);
-
-    offset = initial;
-    while (offset < length) {
-        timeout = I2C_TO;
-        while (DL_I2C_isControllerTXFIFOFull(OLED_INST)) {
-            status = DL_I2C_getControllerStatus(OLED_INST);
-            if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
-                           DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U ||
-                timeout == 0U) {
-                s_last_status = status;
-                s_error_count++;
-                DL_I2C_resetControllerTransfer(OLED_INST);
-                return 0U;
-            }
-            timeout--;
+    for (index = 0U; index < length; index++) {
+        if (i2c_write_byte(data[index]) == 0U) {
+            i2c_stop();
+            s_error_count++;
+            return 0U;
         }
-        DL_I2C_transmitControllerData(OLED_INST, data[offset]);
-        offset++;
     }
-    if (wait_idle() == 0U) {
-        s_error_count++;
-        DL_I2C_resetControllerTransfer(OLED_INST);
-        return 0U;
-    }
-    status = DL_I2C_getControllerStatus(OLED_INST);
-    s_last_status = status;
-    if ((status & (DL_I2C_CONTROLLER_STATUS_ERROR |
-                   DL_I2C_CONTROLLER_STATUS_ARBITRATION_LOST)) != 0U) {
-        s_error_count++;
-        DL_I2C_resetControllerTransfer(OLED_INST);
-        return 0U;
-    }
+    i2c_stop();
     return 1U;
 }
 
@@ -189,10 +219,8 @@ uint8_t SSD1306_Init(void)
     uint8_t address_index;
     uint8_t command_index;
 
-    configure_internal_pullups();
-    s_last_status = 0U;
+    configure_gpio_i2c();
     s_error_count = 0U;
-    s_next_page = 0U;
     delay_cycles(CPUCLK_FREQ / 10U);
     for (address_index = 0U;
          address_index < (uint8_t) sizeof(addresses);
@@ -216,7 +244,6 @@ uint8_t SSD1306_Init(void)
                     break;
                 }
             }
-            s_next_page = 0U;
             return s_online;
         }
     }
@@ -228,11 +255,12 @@ void SSD1306_Clear(void) { memset(s_buf, 0, sizeof(s_buf)); }
 
 uint8_t SSD1306_Update(void)
 {
+    uint8_t page;
+
     if (s_online == 0U) return 0U;
-    if (write_page(s_next_page) != 0U) {
-        s_next_page++;
-        if (s_next_page >= SSD1306_PAGES) {
-            s_next_page = 0U;
+    for (page = 0U; page < OLED_LIVE_PAGES; page++) {
+        if (write_page(page) == 0U) {
+            break;
         }
     }
     return s_online;
@@ -249,35 +277,15 @@ uint8_t SSD1306_TryRecover(void)
 
     if (s_online != 0U) return 1U;
     s_online = 0U;
-    DL_I2C_resetControllerTransfer(OLED_INST);
-    DL_I2C_flushControllerTXFIFO(OLED_INST);
-    DL_I2C_flushControllerRXFIFO(OLED_INST);
-    DL_I2C_disableController(OLED_INST);
-    DL_I2C_disablePower(OLED_INST);
-    delay_cycles((CPUCLK_FREQ / 1000U) * APP_I2C_TIMEOUT_MS);
-    DL_I2C_enablePower(OLED_INST);
-    delay_cycles(POWER_STARTUP_DELAY);
-    DL_GPIO_initDigitalOutput(GPIO_OLED_IOMUX_SCL);
-    DL_GPIO_enableOutput(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
-    DL_GPIO_setPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+    configure_gpio_i2c();
+    sda_release();
     for (pulse = 0U; pulse < 9U; pulse++) {
-        DL_GPIO_clearPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
-        delay_cycles(CPUCLK_FREQ / 200000U);
-        DL_GPIO_setPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
-        delay_cycles(CPUCLK_FREQ / 200000U);
+        scl_low();
+        i2c_delay();
+        (void) wait_scl_high();
+        i2c_delay();
     }
-
-    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SDA,
-        GPIO_OLED_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
-        DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SCL,
-        GPIO_OLED_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
-        DL_GPIO_RESISTOR_PULL_UP, DL_GPIO_HYSTERESIS_DISABLE,
-        DL_GPIO_WAKEUP_DISABLE);
-    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SDA);
-    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SCL);
-    SYSCFG_DL_OLED_init();
+    i2c_stop();
     return SSD1306_Init();
 }
 

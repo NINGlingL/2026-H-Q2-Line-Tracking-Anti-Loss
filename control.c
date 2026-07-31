@@ -383,57 +383,50 @@ static void run_diagnostic(uint32_t now_ms)
 static void draw_oled(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
-    Encoder_State enc = Encoder_GetState();
-    Battery_State battery = Battery_GetState();
-    Moto_State motor = Moto_GetState();
-    const char *imu_status;
+    const char *status;
+    char bits[12];
+    char track[12];
     char line[22];
+    uint8_t channel;
 
-    if (g_imu.valid == 0U) {
-        imu_status = "ERR";
-    } else if (g_imu.stale != 0U) {
-        imu_status = "STALE";
-    } else if (g_imu.calibrated == 0U) {
-        imu_status = "CAL";
+    if (ir.warming_up != 0U) {
+        status = "WARM";
+    } else if (ir.frame_fresh == 0U) {
+        status = "STALE";
+    } else if (ir.frame_valid == 0U) {
+        status = "ERR";
     } else {
-        imu_status = "OK";
+        status = "OK";
     }
 
+    bits[0] = 'S';
+    bits[1] = 'T';
+    bits[2] = ':';
+    track[0] = 'L';
+    track[1] = 'N';
+    track[2] = ':';
+    for (channel = 0U; channel < 8U; channel++) {
+        bits[3U + channel] = (ir.channels[channel] != 0U) ? '1' : '0';
+        track[3U + channel] =
+            (ir.channels[channel] == 0U) ? '#' : '.';
+    }
+    bits[11] = '\0';
+    track[11] = '\0';
+
     SSD1306_Clear();
-    (void) snprintf(line, sizeof(line), "%s %s",
-        mode_name(g_control.mode),
-        motor.hardware_locked != 0U ? "HW-LOCK" : "ARM");
-    SSD1306_ShowString(0U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "IR:%02X P:%d N:%u",
-        ir.raw, ir.position, ir.active_count);
-    SSD1306_ShowString(1U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "ENC:%d V:%d",
-        enc.delta, enc.speed_mm_s);
-    SSD1306_ShowString(2U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "GZ:%d IMU:%s",
-        (int) g_imu.gz, imu_status);
+    SSD1306_ShowString(0U, 0U, "CH:12345678");
+    SSD1306_ShowString(1U, 0U, bits);
+    SSD1306_ShowString(2U, 0U, track);
+    if (((now_ms / 1000U) & 1U) == 0U) {
+        (void) snprintf(line, sizeof(line), "R:%02X P:%d N:%u %s",
+            ir.raw, ir.position, ir.active_count, status);
+    } else {
+        (void) snprintf(line, sizeof(line), "F:%lu E:%lu O:%lu",
+            (unsigned long) ir.good_frames,
+            (unsigned long) ir.bad_frames,
+            (unsigned long) ir.overflow_bytes);
+    }
     SSD1306_ShowString(3U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "L:%d R:%d",
-        g_control.left_command, g_control.right_command);
-    SSD1306_ShowString(4U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "BAT:%lumV %s",
-        (unsigned long) battery.millivolts,
-        battery.configured != 0U ? "ON" : "NC");
-    SSD1306_ShowString(5U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "FR:%lu ER:%lu",
-        (unsigned long) ir.good_frames,
-        (unsigned long) ir.bad_frames);
-    SSD1306_ShowString(6U, 0U, line);
-
-    (void) snprintf(line, sizeof(line), "%s %lus",
-        g_last_command, (unsigned long) (now_ms / 1000U));
-    SSD1306_ShowString(7U, 0U, line);
     (void) SSD1306_Update();
 }
 
