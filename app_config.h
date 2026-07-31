@@ -26,7 +26,7 @@
 /* User-confirmed timing and actuator limits. */
 #define APP_CONTROL_PERIOD_MS          (10U)
 #define APP_I2C_TIMEOUT_MS             (10U)
-#define APP_PWM_MAX_PERMILLE           (300)
+#define APP_PWM_MAX_PERMILLE           (400)
 
 /*
  * WHEELTEC D153C onboard battery divider:
@@ -51,7 +51,7 @@
 #define APP_IR_FRAME_TIMEOUT_MS        (150UL)
 
 /* Conservative first bench-test values, tunable through Bluetooth. */
-#define APP_DIAG_PWM_PERMILLE          (200)
+#define APP_DIAG_PWM_PERMILLE          (350)
 #define APP_AUTO_BASE_PWM_PERMILLE     (220)
 
 /*

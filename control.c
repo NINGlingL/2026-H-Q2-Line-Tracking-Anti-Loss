@@ -268,10 +268,11 @@ static void service_button(uint32_t now_ms)
         raw != g_button_stable) {
         g_button_stable = raw;
         if (raw == 0U) {
-            if (g_control.mode == CONTROL_AUTO_TRACK) {
+            if (g_control.mode == CONTROL_DIAGNOSTIC) {
                 enter_safe("KEY STOP", now_ms);
             } else {
-                enter_auto(now_ms);
+                set_manual_motion(g_diag_power, g_diag_power,
+                    "KEY FWD TEST", now_ms);
             }
         }
     }
