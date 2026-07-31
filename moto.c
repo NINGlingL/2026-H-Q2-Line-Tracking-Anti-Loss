@@ -4,6 +4,11 @@
 
 #define PWM_PERIOD_COUNTS (200U)
 
+/* Keep an actuator-layer ceiling even if a caller or PID is misconfigured. */
+#if APP_PWM_MAX_PERMILLE > 500
+#error "Motor output above 50 percent is not permitted"
+#endif
+
 static Moto_State g_motor;
 
 static uint32_t command_to_compare(int16_t command)
@@ -68,17 +73,17 @@ void Moto_SetLR(int16_t left_permille, int16_t right_permille)
      * P0 actuator hard limits are deliberately inline in the function that
      * writes the physical registers. They do not rely on caller validation.
      */
-    if (left_permille > 300) {
-        left_permille = 300;
+    if (left_permille > APP_PWM_MAX_PERMILLE) {
+        left_permille = APP_PWM_MAX_PERMILLE;
     }
-    if (left_permille < -300) {
-        left_permille = -300;
+    if (left_permille < -APP_PWM_MAX_PERMILLE) {
+        left_permille = -APP_PWM_MAX_PERMILLE;
     }
-    if (right_permille > 300) {
-        right_permille = 300;
+    if (right_permille > APP_PWM_MAX_PERMILLE) {
+        right_permille = APP_PWM_MAX_PERMILLE;
     }
-    if (right_permille < -300) {
-        right_permille = -300;
+    if (right_permille < -APP_PWM_MAX_PERMILLE) {
+        right_permille = -APP_PWM_MAX_PERMILLE;
     }
 
     if ((g_motor.safety_permit == 0U) ||

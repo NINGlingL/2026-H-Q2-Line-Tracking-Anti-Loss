@@ -26,7 +26,7 @@
 /* User-confirmed timing and actuator limits. */
 #define APP_CONTROL_PERIOD_MS          (10U)
 #define APP_I2C_TIMEOUT_MS             (10U)
-#define APP_PWM_MAX_PERMILLE           (300)
+#define APP_PWM_MAX_PERMILLE           (500)
 
 /*
  * WHEELTEC D153C onboard battery divider:
@@ -50,14 +50,14 @@
 #define APP_IR_WARMUP_MS               (20000UL)
 #define APP_IR_FRAME_TIMEOUT_MS        (150UL)
 
-/* Conservative first bench-test values, tunable through Bluetooth. */
+/* Tracking runs at 35%; steering/speed correction may use up to the 50% cap. */
 #define APP_DIAG_PWM_PERMILLE          (200)
-#define APP_AUTO_BASE_PWM_PERMILLE     (220)
+#define APP_AUTO_BASE_PWM_PERMILLE     (350)
 
 /*
  * User-confirmed MG513XP28_12V with Hall encoder and 65 mm wheel:
  *   13 PPR * 28:1 gearbox * 4x quadrature = 1456 counts/wheel revolution.
- * The first closed-loop target is deliberately limited to 0.12 m/s.
+ * Closed-loop target for the faster one-lap test is 0.20 m/s.
  */
 #define APP_MOTOR_GEAR_RATIO           (28UL)
 #define APP_ENCODER_PPR                (13UL)
@@ -67,7 +67,7 @@
 #define APP_WHEEL_DIAMETER_MM          (65UL)
 #define APP_WHEEL_CIRCUMFERENCE_UM     (204204UL)
 #define APP_MOTOR_MAX_VALID_RPM        (500UL)
-#define APP_AUTO_TARGET_SPEED_MM_S     (120)
+#define APP_AUTO_TARGET_SPEED_MM_S     (200)
 
 /* x1-left is provisional; Bluetooth command "IRREV 1" reverses it. */
 #define APP_IR_REVERSED_DEFAULT        (0U)

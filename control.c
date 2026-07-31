@@ -17,6 +17,9 @@
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
 #define YAW_RATE_PER_POSITION (5.0f)
+#define START_MARKER_MIN_LAP_MS  (5000UL)
+#define START_MARKER_CLEAR_MS    (200UL)
+#define START_MARKER_CONFIRM_MS  (20UL)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -32,6 +35,10 @@ static uint32_t g_last_oled_recovery_ms;
 static uint32_t g_last_imu_ms;
 static uint32_t g_imu_period_ms;
 static uint32_t g_line_lost_ms;
+static uint32_t g_marker_clear_ms;
+static uint32_t g_marker_seen_ms;
+static uint32_t g_auto_elapsed_ms;
+static uint8_t g_start_marker_armed;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
 static uint32_t g_button_change_ms;
@@ -51,6 +58,22 @@ static const char *mode_name(Control_Mode mode)
         default:
             return "?";
     }
+}
+
+static uint8_t start_marker_detected(const EightIR_State *ir)
+{
+    uint8_t channel;
+    uint8_t center_active = 0U;
+
+    /* Channels 2..7 are the six middle sensors; zero means black. */
+    for (channel = 1U; channel <= 6U; channel++) {
+        if (ir->channels[channel] == 0U) {
+            center_active++;
+        }
+    }
+
+    /* One missed sensor is tolerated so a fast crossing is not lost. */
+    return (center_active >= 5U) ? 1U : 0U;
 }
 
 static void enter_safe(const char *reason, uint32_t now_ms)
@@ -119,6 +142,10 @@ static void enter_auto(uint32_t now_ms)
     g_control.mode_enter_ms = now_ms;
     g_control.lap_count = 0U;
     g_line_lost_ms = 0U;
+    g_marker_clear_ms = 0U;
+    g_marker_seen_ms = 0U;
+    g_auto_elapsed_ms = 0U;
+    g_start_marker_armed = 0U;
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
 }
 
@@ -288,8 +315,9 @@ static void run_auto(uint32_t now_ms)
     int16_t left;
     int16_t right;
 
-    if ((uint32_t) (now_ms - g_control.mode_enter_ms) >
-        AUTO_TIMEOUT_MS) {
+    g_auto_elapsed_ms = (uint32_t) (now_ms - g_control.mode_enter_ms);
+
+    if (g_auto_elapsed_ms > AUTO_TIMEOUT_MS) {
         enter_safe("AUTO TIMEOUT", now_ms);
         return;
     }
@@ -309,6 +337,35 @@ static void run_auto(uint32_t now_ms)
         return;
     }
     g_line_lost_ms = 0U;
+
+    /*
+     * A is a transverse black start/stop line.  Do not accept it until the
+     * car has clearly left the starting marker, then debounce its return.
+     */
+    if (g_start_marker_armed == 0U) {
+        if (start_marker_detected(&ir) == 0U) {
+            if (g_marker_clear_ms == 0U) {
+                g_marker_clear_ms = now_ms;
+            } else if ((uint32_t) (now_ms - g_marker_clear_ms) >=
+                       START_MARKER_CLEAR_MS) {
+                g_start_marker_armed = 1U;
+            }
+        } else {
+            g_marker_clear_ms = 0U;
+        }
+    } else if (g_auto_elapsed_ms >= START_MARKER_MIN_LAP_MS &&
+               start_marker_detected(&ir) != 0U) {
+        if (g_marker_seen_ms == 0U) {
+            g_marker_seen_ms = now_ms;
+        } else if ((uint32_t) (now_ms - g_marker_seen_ms) >=
+                   START_MARKER_CONFIRM_MS) {
+            g_control.lap_count = 1U;
+            enter_safe("LAP DONE", now_ms);
+            return;
+        }
+    } else {
+        g_marker_seen_ms = 0U;
+    }
 
     if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
         (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
@@ -425,6 +482,11 @@ static void draw_oled(void)
     (void) snprintf(line, sizeof(line), "ENC:%ld S:%d V:%u",
         (long) encoder.total, encoder.speed_mm_s, encoder.valid);
     SSD1306_ShowString(6U, 0U, line);
+    (void) snprintf(line, sizeof(line), "T:%lu.%02lu LAP:%u",
+        (unsigned long) (g_auto_elapsed_ms / 1000U),
+        (unsigned long) ((g_auto_elapsed_ms % 1000U) / 10U),
+        g_control.lap_count);
+    SSD1306_ShowString(7U, 0U, line);
     (void) SSD1306_Update();
 }
 
