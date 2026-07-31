@@ -1,0 +1,17 @@
+# Keil generated output and per-user state
+keil/Objects/
+keil/Listings/
+keil/*.uvguix.*
+keil/*.map
+
+# Other toolchain build output
+gcc/Debug/
+gcc/Release/
+iar/Debug/
+iar/Release/
+ticlang/Debug/
+ticlang/Release/
+
+# Local review/render scratch files
+tmp/
+
