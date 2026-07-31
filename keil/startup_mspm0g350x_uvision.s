@@ -40,7 +40,9 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-Stack_Size      EQU     0x00000100
+; Sensor recovery and OLED text formatting require more than the 256-byte
+; template default. Keep a 2 KiB stack to prevent corruption of adjacent BSS.
+Stack_Size      EQU     0x00000800
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size
