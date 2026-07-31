@@ -20,9 +20,6 @@
 #define BANK_2                  (0x20U)
 #define GYRO_RANGE_DPS          (250.0f)
 #define GYRO_CAL_SAMPLES        (100U)
-#define GYRO_CAL_MAX_DPS        (10.0f)
-#define ACCEL_CAL_MIN_MS2       (7.0f)
-#define ACCEL_CAL_MAX_MS2       (12.5f)
 #define YAW_LPF_TAU_S           (0.030f)
 #define YAW_ZERO_RATE_DPS       (0.35f)
 #define STATIONARY_GYRO_DPS     (1.5f)
@@ -358,7 +355,6 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
     float raw_gx;
     float raw_gy;
     float raw_gz;
-    float accel_magnitude_sq;
     float accel_magnitude;
     float dt_s;
     float alpha;
@@ -412,41 +408,33 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
     }
 
     if (next.calibrated == 0U) {
-        accel_magnitude_sq =
-            next.ax * next.ax + next.ay * next.ay + next.az * next.az;
-        if (fabsf(raw_gx) <= GYRO_CAL_MAX_DPS &&
-            fabsf(raw_gy) <= GYRO_CAL_MAX_DPS &&
-            fabsf(raw_gz) <= GYRO_CAL_MAX_DPS &&
-            accel_magnitude_sq >=
-                ACCEL_CAL_MIN_MS2 * ACCEL_CAL_MIN_MS2 &&
-            accel_magnitude_sq <=
-                ACCEL_CAL_MAX_MS2 * ACCEL_CAL_MAX_MS2) {
-            g_cal_sum_x += raw_gx;
-            g_cal_sum_y += raw_gy;
-            g_cal_sum_z += raw_gz;
-            next.calibration_samples++;
-            if (next.calibration_samples >= GYRO_CAL_SAMPLES) {
-                next.gyro_bias_x =
-                    g_cal_sum_x / (float) GYRO_CAL_SAMPLES;
-                next.gyro_bias_y =
-                    g_cal_sum_y / (float) GYRO_CAL_SAMPLES;
-                next.gyro_bias_z =
-                    g_cal_sum_z / (float) GYRO_CAL_SAMPLES;
-                next.gx = raw_gx - next.gyro_bias_x;
-                next.gy = raw_gy - next.gyro_bias_y;
-                next.gz = raw_gz - next.gyro_bias_z;
-                next.calibrated = 1U;
-                next.yaw_deg = 0.0f;
-                next.yaw_rate_dps = 0.0f;
-                g_yaw_rate_filtered = 0.0f;
-                g_yaw_rate_previous = 0.0f;
-                g_stationary_samples = 0U;
-            }
-        } else {
-            g_cal_sum_x = 0.0f;
-            g_cal_sum_y = 0.0f;
-            g_cal_sum_z = 0.0f;
-            next.calibration_samples = 0U;
+        /*
+         * Average the first 100 already range-checked gyro frames. The old
+         * consecutive-stillness gate reset the counter to zero whenever a
+         * single noisy frame or a larger factory bias crossed its threshold,
+         * which could leave the display permanently at CAL 0/100.
+         * Keep the vehicle still for the roughly two-second startup window.
+         */
+        g_cal_sum_x += raw_gx;
+        g_cal_sum_y += raw_gy;
+        g_cal_sum_z += raw_gz;
+        next.calibration_samples++;
+        if (next.calibration_samples >= GYRO_CAL_SAMPLES) {
+            next.gyro_bias_x =
+                g_cal_sum_x / (float) GYRO_CAL_SAMPLES;
+            next.gyro_bias_y =
+                g_cal_sum_y / (float) GYRO_CAL_SAMPLES;
+            next.gyro_bias_z =
+                g_cal_sum_z / (float) GYRO_CAL_SAMPLES;
+            next.gx = raw_gx - next.gyro_bias_x;
+            next.gy = raw_gy - next.gyro_bias_y;
+            next.gz = raw_gz - next.gyro_bias_z;
+            next.calibrated = 1U;
+            next.yaw_deg = 0.0f;
+            next.yaw_rate_dps = 0.0f;
+            g_yaw_rate_filtered = 0.0f;
+            g_yaw_rate_previous = 0.0f;
+            g_stationary_samples = 0U;
         }
     }
 
