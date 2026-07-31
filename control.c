@@ -16,6 +16,7 @@
 #define AUTO_TIMEOUT_MS       (35000UL)
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
+#define ENCODER_START_TIMEOUT_MS (1500UL)
 #define YAW_RATE_PER_POSITION (5.0f)
 
 static Control_State g_control;
@@ -310,6 +311,14 @@ static void run_auto(uint32_t now_ms)
     }
     g_line_lost_ms = 0U;
 
+    /* Allow an open-loop launch, then require real right-wheel pulses. */
+    if ((uint32_t) (now_ms - g_control.mode_enter_ms) >=
+            ENCODER_START_TIMEOUT_MS &&
+        encoder.valid == 0U) {
+        enter_safe("ENC LOST", now_ms);
+        return;
+    }
+
     if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
         (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
         speed_feedback = fabsf((float) encoder.speed_mm_s);
@@ -422,8 +431,8 @@ static void draw_oled(void)
         motor.standby_enabled,
         motor.left_permille / 10, motor.right_permille / 10);
     SSD1306_ShowString(5U, 0U, line);
-    (void) snprintf(line, sizeof(line), "ENC:%d D:%d V:%u",
-        encoder.speed_mm_s, encoder.delta, encoder.valid);
+    (void) snprintf(line, sizeof(line), "ENC:%ld S:%d V:%u",
+        (long) encoder.total, encoder.speed_mm_s, encoder.valid);
     SSD1306_ShowString(6U, 0U, line);
     (void) SSD1306_Update();
 }
@@ -434,8 +443,8 @@ void Control_Init(uint32_t now_ms)
     memset(&g_imu, 0, sizeof(g_imu));
     PID_Init(&g_line_pid, 8.0f, 0.3f, 0.12f,
         20.0f, 70.0f, 4.0f);
-    PID_Init(&g_speed_pid, 0.25f, 0.05f, 0.0f,
-        100.0f, 20.0f, 80.0f);
+    PID_Init(&g_speed_pid, 0.45f, 0.40f, 0.0f,
+        150.0f, 140.0f, 200.0f);
     PID_Init(&g_yaw_pid, 0.8f, 0.02f, 0.0f,
         30.0f, 30.0f, 60.0f);
     g_control.mode = CONTROL_SAFE;

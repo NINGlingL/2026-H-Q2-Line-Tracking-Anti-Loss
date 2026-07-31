@@ -3,20 +3,42 @@
 #include "ti_msp_dl_config.h"
 #include <limits.h>
 
-#define ENCODER_CENTER_COUNT      (32768U)
 #define ENCODER_MAX_SAMPLE_MS     (50UL)
 #define ENCODER_DELTA_MARGIN      (8UL)
+#define ENCODER_SIGNAL_HOLD_MS    (500UL)
 
 static Encoder_State g_encoder;
+static uint16_t g_previous_count;
+static uint32_t g_last_pulse_ms;
 
 void Encoder_Init(void)
 {
     g_encoder.total = 0;
     g_encoder.delta = 0;
     g_encoder.speed_mm_s = 0;
-    g_encoder.valid = 1U;
+    g_encoder.valid = 0U;
     g_encoder.sample_ms = 0U;
-    DL_TimerG_setTimerCount(QEI_R_INST, ENCODER_CENTER_COUNT);
+    g_last_pulse_ms = 0U;
+
+    /*
+     * Hall encoder outputs are commonly open-drain. Keep the SysConfig QEI
+     * mux while explicitly enabling the MCU pull-ups on PB10/PB11.
+     */
+    DL_GPIO_initPeripheralInputFunctionFeatures(
+        GPIO_QEI_R_PHA_IOMUX, GPIO_QEI_R_PHA_IOMUX_FUNC,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initPeripheralInputFunctionFeatures(
+        GPIO_QEI_R_PHB_IOMUX, GPIO_QEI_R_PHB_IOMUX_FUNC,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_ENABLE, DL_GPIO_WAKEUP_DISABLE);
+
+    /* QEI inputs are explicitly inputs before the counter is started. */
+    DL_TimerG_stopCounter(QEI_R_INST);
+    DL_TimerG_setCCPDirection(
+        QEI_R_INST, DL_TIMER_CC0_INPUT | DL_TIMER_CC1_INPUT);
+    DL_TimerG_setTimerCount(QEI_R_INST, 0U);
+    g_previous_count = 0U;
     DL_TimerG_startCounter(QEI_R_INST);
 }
 
@@ -25,12 +47,15 @@ void Encoder_Sample(uint32_t now_ms)
     uint32_t elapsed_ms =
         (uint32_t) (now_ms - g_encoder.sample_ms);
     uint32_t max_delta;
+    uint16_t current_count;
     int64_t speed;
-    int32_t delta =
-        (int32_t) DL_TimerG_getTimerCount(QEI_R_INST) -
-        (int32_t) ENCODER_CENTER_COUNT;
+    int32_t delta;
 
-    DL_TimerG_setTimerCount(QEI_R_INST, ENCODER_CENTER_COUNT);
+    current_count =
+        (uint16_t) DL_TimerG_getTimerCount(QEI_R_INST);
+    /* Signed 16-bit subtraction handles counter wrap in either direction. */
+    delta = (int32_t) (int16_t) (current_count - g_previous_count);
+    g_previous_count = current_count;
 
     if (g_encoder.sample_ms == 0U) {
         elapsed_ms = APP_CONTROL_PERIOD_MS;
@@ -66,7 +91,13 @@ void Encoder_Sample(uint32_t now_ms)
         } else {
             g_encoder.total += delta;
         }
-        g_encoder.valid = 1U;
+        if (delta != 0) {
+            g_last_pulse_ms = now_ms;
+        }
+        g_encoder.valid =
+            (g_last_pulse_ms != 0U &&
+             (uint32_t) (now_ms - g_last_pulse_ms) <=
+                ENCODER_SIGNAL_HOLD_MS) ? 1U : 0U;
     }
     g_encoder.sample_ms = now_ms;
 }
