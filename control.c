@@ -18,8 +18,10 @@
 #define IMU_PERIOD_MS         (20UL)
 #define YAW_RATE_PER_POSITION (5.0f)
 #define START_MARKER_MIN_LAP_MS  (5000UL)
-#define START_MARKER_CLEAR_MS    (200UL)
-#define START_MARKER_CONFIRM_MS  (20UL)
+#define START_MARKER_CLEAR_MS    (80UL)
+#define LINE_FILTER_ALPHA        (0.25f)
+#define LINE_CENTER_DEADBAND     (1.25f)
+#define STRAIGHT_YAW_RATE_DPS    (10.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -36,8 +38,8 @@ static uint32_t g_last_imu_ms;
 static uint32_t g_imu_period_ms;
 static uint32_t g_line_lost_ms;
 static uint32_t g_marker_clear_ms;
-static uint32_t g_marker_seen_ms;
 static uint32_t g_auto_elapsed_ms;
+static float g_filtered_line_position;
 static uint8_t g_start_marker_armed;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
@@ -62,18 +64,12 @@ static const char *mode_name(Control_Mode mode)
 
 static uint8_t start_marker_detected(const EightIR_State *ir)
 {
-    uint8_t channel;
-    uint8_t center_active = 0U;
-
-    /* Channels 2..7 are the six middle sensors; zero means black. */
-    for (channel = 1U; channel <= 6U; channel++) {
-        if (ir->channels[channel] == 0U) {
-            center_active++;
-        }
-    }
-
-    /* One missed sensor is tolerated so a fast crossing is not lost. */
-    return (center_active >= 5U) ? 1U : 0U;
+    /*
+     * The A marker makes the six middle detectors see black.  Count all
+     * active detectors here so UART channel order or IR reversal cannot
+     * hide the marker; a normal 1.8 cm guide line activates far fewer.
+     */
+    return (ir->active_count >= 5U) ? 1U : 0U;
 }
 
 static void enter_safe(const char *reason, uint32_t now_ms)
@@ -143,8 +139,8 @@ static void enter_auto(uint32_t now_ms)
     g_control.lap_count = 0U;
     g_line_lost_ms = 0U;
     g_marker_clear_ms = 0U;
-    g_marker_seen_ms = 0U;
     g_auto_elapsed_ms = 0U;
+    g_filtered_line_position = 0.0f;
     g_start_marker_armed = 0U;
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
 }
@@ -310,6 +306,7 @@ static void run_auto(uint32_t now_ms)
     float correction;
     float yaw_assist = 0.0f;
     float desired_yaw_rate;
+    float line_error;
     float base = (float) APP_AUTO_BASE_PWM_PERMILLE;
     float speed_feedback;
     int16_t left;
@@ -340,7 +337,7 @@ static void run_auto(uint32_t now_ms)
 
     /*
      * A is a transverse black start/stop line.  Do not accept it until the
-     * car has clearly left the starting marker, then debounce its return.
+     * car has clearly left the starting marker; accept one frame on return.
      */
     if (g_start_marker_armed == 0U) {
         if (start_marker_detected(&ir) == 0U) {
@@ -355,16 +352,23 @@ static void run_auto(uint32_t now_ms)
         }
     } else if (g_auto_elapsed_ms >= START_MARKER_MIN_LAP_MS &&
                start_marker_detected(&ir) != 0U) {
-        if (g_marker_seen_ms == 0U) {
-            g_marker_seen_ms = now_ms;
-        } else if ((uint32_t) (now_ms - g_marker_seen_ms) >=
-                   START_MARKER_CONFIRM_MS) {
-            g_control.lap_count = 1U;
-            enter_safe("LAP DONE", now_ms);
-            return;
-        }
-    } else {
-        g_marker_seen_ms = 0U;
+        /* One valid UART frame is enough; the narrow marker passes quickly. */
+        g_control.lap_count = 1U;
+        enter_safe("LAP DONE", now_ms);
+        return;
+    }
+
+    g_filtered_line_position += LINE_FILTER_ALPHA *
+        ((float) ir.position - g_filtered_line_position);
+    line_error = g_filtered_line_position;
+    if (fabsf(line_error) < LINE_CENTER_DEADBAND) {
+        line_error = 0.0f;
+    }
+
+    if (line_error == 0.0f && ir.active_count <= 3U &&
+        (g_imu.valid == 0U || g_imu.stale != 0U ||
+         fabsf(g_imu.yaw_rate_dps) < STRAIGHT_YAW_RATE_DPS)) {
+        base = (float) APP_AUTO_STRAIGHT_PWM_PERMILLE;
     }
 
     if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
@@ -376,18 +380,16 @@ static void run_auto(uint32_t now_ms)
         PID_Reset(&g_speed_pid);
     }
 
-    correction =
-        PID_Update(&g_line_pid, (float) ir.position, 0.010f);
+    correction = PID_Update(&g_line_pid, line_error, 0.010f);
 
     /*
      * The line position requests a turn rate. The filtered Z gyro closes a
      * second loop around that request, damping oscillation without relying
      * on the drifting absolute yaw angle.
      */
-    if (g_imu.valid != 0U && g_imu.stale == 0U &&
+    if (line_error != 0.0f && g_imu.valid != 0U && g_imu.stale == 0U &&
         g_imu.calibrated != 0U && isfinite(g_imu.yaw_rate_dps)) {
-        desired_yaw_rate =
-            (float) ir.position * YAW_RATE_PER_POSITION;
+        desired_yaw_rate = line_error * YAW_RATE_PER_POSITION;
         yaw_assist = PID_Update(&g_yaw_pid,
             desired_yaw_rate - g_imu.yaw_rate_dps, 0.010f);
     } else {
@@ -482,9 +484,10 @@ static void draw_oled(void)
     (void) snprintf(line, sizeof(line), "ENC:%ld S:%d V:%u",
         (long) encoder.total, encoder.speed_mm_s, encoder.valid);
     SSD1306_ShowString(6U, 0U, line);
-    (void) snprintf(line, sizeof(line), "T:%lu.%02lu LAP:%u",
+    (void) snprintf(line, sizeof(line), "T:%lu.%02lu A:%u L:%u",
         (unsigned long) (g_auto_elapsed_ms / 1000U),
         (unsigned long) ((g_auto_elapsed_ms % 1000U) / 10U),
+        g_start_marker_armed,
         g_control.lap_count);
     SSD1306_ShowString(7U, 0U, line);
     (void) SSD1306_Update();
@@ -494,8 +497,8 @@ void Control_Init(uint32_t now_ms)
 {
     memset(&g_control, 0, sizeof(g_control));
     memset(&g_imu, 0, sizeof(g_imu));
-    PID_Init(&g_line_pid, 8.0f, 0.3f, 0.12f,
-        20.0f, 70.0f, 4.0f);
+    PID_Init(&g_line_pid, 7.0f, 0.2f, 0.04f,
+        20.0f, 110.0f, 4.0f);
     PID_Init(&g_speed_pid, 0.45f, 0.40f, 0.0f,
         150.0f, 140.0f, 200.0f);
     PID_Init(&g_yaw_pid, 0.8f, 0.02f, 0.0f,
