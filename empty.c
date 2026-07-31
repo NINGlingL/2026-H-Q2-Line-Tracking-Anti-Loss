@@ -58,7 +58,9 @@ int main(void)
     Timebase_Init();
     Battery_Init();
     Encoder_Init();
+#if APP_ENABLE_BLUETOOTH
     UartBT_Init();
+#endif
     EightIR_Init(Timebase_Millis());
 #if APP_ENABLE_IMU
     (void) ICM20948_Init();

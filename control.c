@@ -34,7 +34,6 @@ static uint32_t g_line_lost_ms;
 static uint8_t g_crossline_seen;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
-static uint8_t g_button_reported;
 static uint32_t g_button_change_ms;
 static char g_last_command[22];
 
@@ -289,6 +288,15 @@ static void service_button(uint32_t now_ms)
     uint8_t raw =
         (DL_GPIO_readPins(KEY_PORT, KEY_START_PIN) == 0U) ? 0U : 1U;
 
+    /* Release always wins over debounce so a point-run command stops now. */
+    if (raw != 0U && g_button_stable == 0U) {
+        g_button_last_raw = 1U;
+        g_button_stable = 1U;
+        g_button_change_ms = now_ms;
+        enter_safe("KEY STOP", now_ms);
+        return;
+    }
+
     if (raw != g_button_last_raw) {
         g_button_last_raw = raw;
         g_button_change_ms = now_ms;
@@ -297,16 +305,10 @@ static void service_button(uint32_t now_ms)
         raw != g_button_stable) {
         g_button_stable = raw;
         if (raw == 0U) {
-            g_button_reported = 0U;
-        }
-    }
-
-    if (g_button_stable == 0U && g_button_reported == 0U) {
-        g_button_reported = 1U;
-        if (g_control.mode == CONTROL_AUTO_TRACK) {
-            enter_safe("KEY STOP", now_ms);
+            set_manual_motion(
+                g_diag_power, g_diag_power, "KEY FWD", now_ms);
         } else {
-            enter_auto(now_ms);
+            enter_safe("KEY STOP", now_ms);
         }
     }
 }
@@ -452,14 +454,13 @@ static void draw_oled(void)
             ir.position, ir.active_count);
     }
     SSD1306_ShowString(3U, 0U, line);
-    (void) snprintf(line, sizeof(line), "BT:%s", g_last_command);
+    (void) snprintf(line, sizeof(line), "KEY:%s", g_last_command);
     SSD1306_ShowString(4U, 0U, line);
     (void) snprintf(line, sizeof(line), "M:%s L:%d R:%d",
         mode_name(g_control.mode),
         motor.left_permille / 10, motor.right_permille / 10);
     SSD1306_ShowString(5U, 0U, line);
-    (void) snprintf(line, sizeof(line), "RX:%lu BAT:%lumV",
-        (unsigned long) UartBT_GetRxCount(),
+    (void) snprintf(line, sizeof(line), "BAT:%lumV",
         (unsigned long) battery.millivolts);
     SSD1306_ShowString(6U, 0U, line);
     (void) SSD1306_Update();
@@ -485,7 +486,6 @@ void Control_Init(uint32_t now_ms)
     g_imu_period_ms = IMU_PERIOD_MS;
     g_button_last_raw = 1U;
     g_button_stable = 1U;
-    g_button_reported = 1U;
     g_button_change_ms = now_ms;
     (void) snprintf(g_last_command, sizeof(g_last_command), "BOOT SAFE");
     Moto_SetSafetyPermit(0U);
@@ -493,7 +493,9 @@ void Control_Init(uint32_t now_ms)
 
 void Control_Service(uint32_t now_ms)
 {
+#if APP_ENABLE_BLUETOOTH
     service_bluetooth(now_ms);
+#endif
     service_button(now_ms);
 
 #if APP_ENABLE_IMU

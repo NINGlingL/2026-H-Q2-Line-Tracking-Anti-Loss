@@ -20,6 +20,7 @@
  */
 #define APP_ENABLE_OLED                (1U)
 #define APP_ENABLE_IMU                 (1U)
+#define APP_ENABLE_BLUETOOTH           (0U)
 
 /* User-confirmed timing and actuator limits. */
 #define APP_CONTROL_PERIOD_MS          (10U)
