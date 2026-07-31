@@ -390,6 +390,61 @@
               <FilePath>../empty.c</FilePath>
             </File>
             <File>
+              <FileName>battery.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../battery.c</FilePath>
+            </File>
+            <File>
+              <FileName>control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../control.c</FilePath>
+            </File>
+            <File>
+              <FileName>eight_ir.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../eight_ir.c</FilePath>
+            </File>
+            <File>
+              <FileName>encoder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../encoder.c</FilePath>
+            </File>
+            <File>
+              <FileName>icm20948.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../icm20948.c</FilePath>
+            </File>
+            <File>
+              <FileName>moto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../moto.c</FilePath>
+            </File>
+            <File>
+              <FileName>pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>ssd1306.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../ssd1306.c</FilePath>
+            </File>
+            <File>
+              <FileName>timebase.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../timebase.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_bt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../uart_bt.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../app_config.h</FilePath>
+            </File>
+            <File>
               <FileName>empty.syscfg</FileName>
               <FileType>5</FileType>
               <FilePath>../empty.syscfg</FilePath>

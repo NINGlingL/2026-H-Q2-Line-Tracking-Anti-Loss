@@ -1,7 +1,7 @@
 /**
  *  HC-05 蓝牙串口驱动库 (MSPM0G3507 + UART2)
  *
- *  硬件: PA22=RX  PA21=TX  9600bps 8N1
+ *  硬件: PB16=RX  PB15=TX  9600bps 8N1
  *  使用中断接收 + 环形缓冲区
  */
 #ifndef __UART_BT_H__
@@ -19,9 +19,6 @@
 /** 初始化蓝牙串口 (波特率 9600, 使能 RX 中断, NVIC) */
 void UartBT_Init(void);
 
-/** 自定义波特率初始化 */
-void UartBT_InitBaud(uint32_t baud);
-
 /* ========== 接收 ========== */
 
 /** 缓冲区中有多少字节可读 */
@@ -29,9 +26,6 @@ uint16_t UartBT_Available(void);
 
 /** 读取一个字节 (缓冲区空返回 0, 阻塞版用 UartBT_ReadBlocking) */
 bool UartBT_Read(uint8_t *c);
-
-/** 阻塞读取一个字节 */
-uint8_t UartBT_ReadBlocking(void);
 
 /** 读取一行 (直到 '\n' 或 maxlen-1), 返回实际长度 */
 uint16_t UartBT_ReadLine(char *buf, uint16_t maxlen);

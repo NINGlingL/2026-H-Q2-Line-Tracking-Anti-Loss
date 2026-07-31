@@ -14,12 +14,12 @@ static volatile uint32_t g_total = 0; /* 总接收字节数 */
 
 /* ========== UART ISR ========== */
 
-void UART2_IRQHandler(void)
+void BT_INST_IRQHandler(void)
 {
-    if (DL_UART_Main_getEnabledInterruptStatus(UART_0_INST,
-            DL_UART_MAIN_INTERRUPT_RX) & DL_UART_MAIN_INTERRUPT_RX) {
-        while (!DL_UART_Main_isRXFIFOEmpty(UART_0_INST)) {
-            uint8_t c = DL_UART_Main_receiveData(UART_0_INST);
+    switch (DL_UART_Main_getPendingInterrupt(BT_INST)) {
+    case DL_UART_MAIN_IIDX_RX:
+        while (!DL_UART_Main_isRXFIFOEmpty(BT_INST)) {
+            uint8_t c = DL_UART_Main_receiveData(BT_INST);
             g_total++;
             uint16_t next = (g_wr + 1) % UART_BT_BUF_SIZE;
             if (next != g_rd) {
@@ -27,8 +27,9 @@ void UART2_IRQHandler(void)
                 g_wr = next;
             }
         }
-        DL_UART_Main_clearInterruptStatus(UART_0_INST,
-            DL_UART_MAIN_INTERRUPT_RX);
+        break;
+    default:
+        break;
     }
 }
 
@@ -36,21 +37,16 @@ void UART2_IRQHandler(void)
 
 void UartBT_Init(void)
 {
-    UartBT_InitBaud(9600);
-}
-
-void UartBT_InitBaud(uint32_t baud)
-{
-    DL_UART_Main_disable(UART_0_INST);
-    DL_UART_Main_configBaudRate(UART_0_INST, CPUCLK_FREQ, baud);
-    DL_UART_Main_setRXFIFOThreshold(UART_0_INST,
+    g_wr = 0U;
+    g_rd = 0U;
+    g_total = 0U;
+    DL_UART_Main_setRXFIFOThreshold(BT_INST,
         DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
-    DL_UART_Main_enableInterrupt(UART_0_INST,
+    DL_UART_Main_enableInterrupt(BT_INST,
         DL_UART_MAIN_INTERRUPT_RX);
-    DL_UART_Main_enable(UART_0_INST);
-    DL_UART_Main_clearInterruptStatus(UART_0_INST, 0xFF);
-    NVIC_ClearPendingIRQ(UART_0_INST_INT_IRQN);
-    NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
+    DL_UART_Main_clearInterruptStatus(BT_INST, 0xFFU);
+    NVIC_ClearPendingIRQ(BT_INST_INT_IRQN);
+    NVIC_EnableIRQ(BT_INST_INT_IRQN);
 }
 
 /* ========== 接收 ========== */
@@ -69,13 +65,6 @@ bool UartBT_Read(uint8_t *c)
     *c = g_ring[g_rd];
     g_rd = (g_rd + 1) % UART_BT_BUF_SIZE;
     return true;
-}
-
-uint8_t UartBT_ReadBlocking(void)
-{
-    uint8_t c;
-    while (!UartBT_Read(&c));
-    return c;
 }
 
 uint16_t UartBT_ReadLine(char *buf, uint16_t maxlen)
@@ -129,7 +118,7 @@ uint32_t UartBT_GetRxCount(void)
 
 void UartBT_Write(uint8_t c)
 {
-    DL_UART_Main_transmitDataBlocking(UART_0_INST, c);
+    DL_UART_Main_transmitDataBlocking(BT_INST, c);
 }
 
 void UartBT_WriteStr(const char *s)

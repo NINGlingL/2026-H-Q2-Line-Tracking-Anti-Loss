@@ -1,41 +1,67 @@
-## Example Summary
+# MSPM0G3507 车载循迹控制 V1
 
-Empty project using DriverLib.
-This example shows a basic empty project using DriverLib with just main file
-and SysConfig initialization.
+目标硬件为立创·天猛星 MSPM0G3507，使用 Keil、TI SysConfig 和
+CMSIS-DAP。V1 已建立自动循迹与蓝牙检测双模式，但在电池监测分压和
+TB6612 STBY 外部下拉确认前，电机硬件锁保持开启。
 
-## Peripherals & Pin Assignments
+## 已核对引脚
 
-| Peripheral | Pin | Function |
-| --- | --- | --- |
-| SYSCTL |  |  |
-| DEBUGSS | PA20 | Debug Clock |
-| DEBUGSS | PA19 | Debug Data In Out |
+| 功能 | 引脚 |
+| --- | --- |
+| TB6612 PWMA（右轮 A） | PB0 / TIMA1_CCP0 |
+| TB6612 PWMB（左轮 B） | PB1 / TIMA1_CCP1 |
+| AIN1 / AIN2 | PA14 / PA15 |
+| BIN1 / BIN2 | PA12 / PA13 |
+| STBY | PB14 |
+| 右轮编码器 QEI | PB10 / PB11 |
+| 八路巡线 UART3 TX / RX | PB12 / PB13 |
+| HC-05 UART2 TX / RX | PB15 / PB16 |
+| ICM20948 I2C1 SCL / SDA | PB2 / PB3 |
+| SSD1306 I2C0 SDA / SCL | PA0 / PA1 |
+| 板载启动按键（低有效） | PB21 |
+| 预留电池电压 ADC1_A1_2 | PA17 |
+| SWDIO / SWCLK | PA19 / PA20 |
 
-## BoosterPacks, Board Resources & Jumper Settings
+PWM 时钟为 4 MHz，周期计数为 200，因此载波频率为
+`4 MHz / 200 = 20 kHz`。软件和电机驱动入口都把最大输出限制为 80%。
 
-Visit [LP_MSPM0G3507](https://www.ti.com/tool/LP-MSPM0G3507) for LaunchPad information, including user guide and hardware files.
+## 模式与蓝牙命令
 
-| Pin | Peripheral | Function | LaunchPad Pin | LaunchPad Settings |
-| --- | --- | --- | --- | --- |
-| PA20 | DEBUGSS | SWCLK | N/A | <ul><li>PA20 is used by SWD during debugging<br><ul><li>`J101 15:16 ON` Connect to XDS-110 SWCLK while debugging<br><li>`J101 15:16 OFF` Disconnect from XDS-110 SWCLK if using pin in application</ul></ul> |
-| PA19 | DEBUGSS | SWDIO | N/A | <ul><li>PA19 is used by SWD during debugging<br><ul><li>`J101 13:14 ON` Connect to XDS-110 SWDIO while debugging<br><li>`J101 13:14 OFF` Disconnect from XDS-110 SWDIO if using pin in application</ul></ul> |
+- 板载 PB21：在安全条件满足后启动自动循迹；再次按下停止。
+- `A`：请求自动循迹。
+- `D`：进入检测模式。
+- `F/B/L/R`：检测模式下前进、后退、原地左转、原地右转。
+- `S`：立即停止并拉低 STBY。
+- `+/-`：以 5% 步进调整检测功率，范围 10% 至 80%。
+- `I`：翻转八路巡线 x1-x8 左右顺序。
+- `C`：请求巡线模块进入校准模式，随后仍需按模块板载按键采集黑白值。
+- `?`：返回命令帮助。
 
-### Device Migration Recommendations
-This project was developed for a superset device included in the LP_MSPM0G3507 LaunchPad. Please
-visit the [CCS User's Guide](https://software-dl.ti.com/msp430/esd/MSPM0-SDK/latest/docs/english/tools/ccs_ide_guide/doc_guide/doc_guide-srcs/ccs_ide_guide.html#sysconfig-project-migration)
-for information about migrating to other MSPM0 devices.
+检测模式最长 30 秒，自动循迹最长 35 秒，超时均进入安全状态。
+巡线帧超过 150 ms 未更新、持续丢线 50 ms、低电锁定或控制状态异常时，
+固件会清零 PWM、拉低 STBY 并停止。
 
-### Low-Power Recommendations
-TI recommends to terminate unused pins by setting the corresponding functions to
-GPIO and configure the pins to output low or input with internal
-pullup/pulldown resistor.
+## OLED 页面
 
-SysConfig allows developers to easily configure unused pins by selecting **Board**→**Configure Unused Pins**.
+OLED 显示模式及硬件锁、八路巡线原始值/位置/有效探头数、右轮编码器增量
+与累计值、ICM20948 Z 轴角速度、左右轮指令、电池 ADC、巡线通信统计和
+最近命令。
 
-For more information about jumper configuration to achieve low-power using the
-MSPM0 LaunchPad, please visit the [LP-MSPM0G3507 User's Guide](https://www.ti.com/lit/slau873).
+## 当前硬件锁
 
-## Example Usage
+`app_config.h` 中 `APP_MOTOR_HW_READY` 当前为 `0`，因此任何按键或蓝牙
+命令都不能拉高 STBY。解除前需完成：
 
-Compile, load and run the example.
+1. PB14/STBY 对 GND 增加 10 kOhm 外部下拉。
+2. 电机电源通过 39 kOhm / 10 kOhm 分压接入 PA17，并在 PA17 对 GND
+   并联 100 nF。
+3. 根据实际电池类型填写 `APP_BATTERY_LOW_MV`，确认 OLED 电压读数。
+4. 将车轮悬空，以低功率检测模式核对左右轮方向、编码器符号和巡线左右顺序。
+
+编码器每轮计数和轮距尚未提供，因此 V1 的编码器速度目标为 0，自动模式先
+使用保守基础 PWM；获得参数后再启用右轮速度 PID，并标定 IMU 转向阻尼符号。
+
+## 编译
+
+打开 `keil/empty_LP_MSPM0G3507_nortos_keil.uvprojx` 后执行 Build。
+构建前 Keil 会自动运行 SysConfig。当前构建结果为 0 errors、0 warnings。

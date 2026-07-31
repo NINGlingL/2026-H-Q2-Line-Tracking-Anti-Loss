@@ -3,6 +3,7 @@ keil/Objects/
 keil/Listings/
 keil/*.uvguix.*
 keil/*.map
+keil/build_cli.log
 
 # Other toolchain build output
 gcc/Debug/
@@ -14,4 +15,3 @@ ticlang/Release/
 
 # Local review/render scratch files
 tmp/
-

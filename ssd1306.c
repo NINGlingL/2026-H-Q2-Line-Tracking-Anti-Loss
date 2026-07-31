@@ -1,53 +1,58 @@
 /**
  * SSD1306 128x64 OLED 驱动实现 (I2C)
- * 使用 SysConfig 生成的 I2C_0_INST
+ * Uses the SysConfig-generated OLED_INST.
  */
 #include "ssd1306.h"
+#include "app_config.h"
 #include "ti_msp_dl_config.h"
 #include <string.h>
 
-#define I2C_TO  150000UL
+#define I2C_TO  ((CPUCLK_FREQ / 1000UL) * APP_I2C_TIMEOUT_MS)
 static uint8_t s_buf[SSD1306_PAGES][SSD1306_WIDTH];
+static uint8_t s_online;
 
 /* ── I2C 底层 ── */
 static void _cmd(uint8_t cmd)
 {
     uint8_t tx[2] = {0x00, cmd};
     volatile uint32_t to = I2C_TO;
-    while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
-        if (--to == 0) return;
-    DL_I2C_fillControllerTXFIFO(I2C_0_INST, tx, 2);
-    DL_I2C_startControllerTransfer(I2C_0_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) return;
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) return;
+    if (s_online == 0U) return;
+    while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
+        if (--to == 0) { s_online = 0U; return; }
+    DL_I2C_fillControllerTXFIFO(OLED_INST, tx, 2);
+    DL_I2C_startControllerTransfer(OLED_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) { s_online = 0U; return; }
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) { s_online = 0U; return; }
 }
 
 static void _data(uint8_t d)
 {
     uint8_t tx[2] = {0x40, d};
     volatile uint32_t to = I2C_TO;
-    while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
-        if (--to == 0) return;
-    DL_I2C_fillControllerTXFIFO(I2C_0_INST, tx, 2);
-    DL_I2C_startControllerTransfer(I2C_0_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) return;
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) return;
+    if (s_online == 0U) return;
+    while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
+        if (--to == 0) { s_online = 0U; return; }
+    DL_I2C_fillControllerTXFIFO(OLED_INST, tx, 2);
+    DL_I2C_startControllerTransfer(OLED_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) { s_online = 0U; return; }
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) { s_online = 0U; return; }
 }
 
 /* ── 写入多字节 (寄存器地址 + 数据) ── */
 void SSD1306_WriteBytes(uint8_t *data, uint8_t len)
 {
     volatile uint32_t to = I2C_TO;
-    while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
-        if (--to == 0) return;
-    DL_I2C_fillControllerTXFIFO(I2C_0_INST, data, len);
-    DL_I2C_startControllerTransfer(I2C_0_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, len);
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) return;
-    to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) return;
+    if (s_online == 0U) return;
+    while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
+        if (--to == 0) { s_online = 0U; return; }
+    DL_I2C_fillControllerTXFIFO(OLED_INST, data, len);
+    DL_I2C_startControllerTransfer(OLED_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, len);
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) { s_online = 0U; return; }
+    to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) { s_online = 0U; return; }
 }
 
 /* ── 初始化 ── */
-void SSD1306_Init(void)
+uint8_t SSD1306_Init(void)
 {
     uint8_t cmds[] = {0x00, 0xAE, 0x00,0xD5,0x00,0x80, 0x00,0xA8,0x00,0x3F,
         0x00,0xD3,0x00,0x00, 0x00,0x40, 0x00,0x8D,0x00,0x14,
@@ -56,26 +61,78 @@ void SSD1306_Init(void)
         0x00,0xD9,0x00,0xF1, 0x00,0xDB,0x00,0x40,
         0x00,0xA4, 0x00,0xA6, 0x00,0xAF};
     volatile uint32_t to;
+    s_online = 1U;
     for (int i = 0; i < sizeof(cmds); i += 2) {
         to = I2C_TO;
-        while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
-            if (--to == 0) break;
-        DL_I2C_fillControllerTXFIFO(I2C_0_INST, &cmds[i], 2);
-        DL_I2C_startControllerTransfer(I2C_0_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
-        to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) break;
-        to = I2C_TO; while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) break;
+        while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))
+            if (--to == 0) { s_online = 0U; break; }
+        if (s_online == 0U) break;
+        DL_I2C_fillControllerTXFIFO(OLED_INST, &cmds[i], 2);
+        DL_I2C_startControllerTransfer(OLED_INST, SSD1306_I2C_ADDR, DL_I2C_CONTROLLER_DIRECTION_TX, 2);
+        to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS)) if (--to==0) { s_online = 0U; break; }
+        to = I2C_TO; while (!(DL_I2C_getControllerStatus(OLED_INST) & DL_I2C_CONTROLLER_STATUS_IDLE))     if (--to==0) { s_online = 0U; break; }
     }
-    SSD1306_Clear(); SSD1306_Update();
+    SSD1306_Clear();
+    (void) SSD1306_Update();
+    return s_online;
 }
 
 void SSD1306_Clear(void) { memset(s_buf, 0, sizeof(s_buf)); }
 
-void SSD1306_Update(void)
+uint8_t SSD1306_Update(void)
 {
+    if (s_online == 0U) return 0U;
     for (uint8_t p = 0; p < SSD1306_PAGES; p++) {
         _cmd(0xB0 + p); _cmd(0x00); _cmd(0x10);
-        for (uint8_t c = 0; c < SSD1306_WIDTH; c++) _data(s_buf[p][c]);
+        for (uint8_t c = 0; c < SSD1306_WIDTH && s_online != 0U; c++)
+            _data(s_buf[p][c]);
+        if (s_online == 0U) break;
     }
+    return s_online;
+}
+
+uint8_t SSD1306_IsOnline(void)
+{
+    return s_online;
+}
+
+uint8_t SSD1306_TryRecover(void)
+{
+    uint8_t pulse;
+
+    if (s_online != 0U) return 1U;
+    DL_I2C_resetControllerTransfer(OLED_INST);
+    DL_I2C_flushControllerTXFIFO(OLED_INST);
+    DL_I2C_flushControllerRXFIFO(OLED_INST);
+    DL_I2C_disableController(OLED_INST);
+    DL_I2C_disablePower(OLED_INST);
+    delay_cycles((CPUCLK_FREQ / 1000U) * APP_I2C_TIMEOUT_MS);
+    DL_I2C_enablePower(OLED_INST);
+    delay_cycles(POWER_STARTUP_DELAY);
+    SYSCFG_DL_OLED_init();
+
+    DL_GPIO_initDigitalOutput(GPIO_OLED_IOMUX_SCL);
+    DL_GPIO_enableOutput(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+    DL_GPIO_setPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+    for (pulse = 0U; pulse < 9U; pulse++) {
+        DL_GPIO_clearPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+        delay_cycles(CPUCLK_FREQ / 200000U);
+        DL_GPIO_setPins(GPIO_OLED_SCL_PORT, GPIO_OLED_SCL_PIN);
+        delay_cycles(CPUCLK_FREQ / 200000U);
+    }
+
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SDA,
+        GPIO_OLED_IOMUX_SDA_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initPeripheralInputFunctionFeatures(GPIO_OLED_IOMUX_SCL,
+        GPIO_OLED_IOMUX_SCL_FUNC, DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_NONE, DL_GPIO_HYSTERESIS_DISABLE,
+        DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SDA);
+    DL_GPIO_enableHiZ(GPIO_OLED_IOMUX_SCL);
+    SYSCFG_DL_OLED_init();
+    return SSD1306_Init();
 }
 
 /* ── 5x7 字体 ── */

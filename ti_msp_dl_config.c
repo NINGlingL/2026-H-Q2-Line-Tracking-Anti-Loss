@@ -60,6 +60,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     SYSCFG_DL_IMU20948_init();
     SYSCFG_DL_IR8_init();
     SYSCFG_DL_BT_init();
+    SYSCFG_DL_BAT_ADC_init();
+    SYSCFG_DL_WWDT0_init();
     /* Ensure backup structures have no valid state */
 	gPWM_0Backup.backupRdy 	= false;
 	gQEI_RBackup.backupRdy 	= false;
@@ -103,6 +105,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_I2C_reset(IMU20948_INST);
     DL_UART_Main_reset(IR8_INST);
     DL_UART_Main_reset(BT_INST);
+    DL_ADC12_reset(BAT_ADC_INST);
+    DL_WWDT_reset(WWDT0_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
@@ -112,6 +116,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_I2C_enablePower(IMU20948_INST);
     DL_UART_Main_enablePower(IR8_INST);
     DL_UART_Main_enablePower(BT_INST);
+    DL_ADC12_enablePower(BAT_ADC_INST);
+    DL_WWDT_enablePower(WWDT0_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
 
@@ -158,6 +164,10 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 
     DL_GPIO_initDigitalOutput(STBY_STBY3_IOMUX);
 
+    DL_GPIO_initDigitalInputFeatures(KEY_START_IOMUX,
+		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+
     DL_GPIO_initDigitalOutput(MOTO_AIN1_IOMUX);
 
     DL_GPIO_initDigitalOutput(MOTO_AIN2_IOMUX);
@@ -166,24 +176,16 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 
     DL_GPIO_initDigitalOutput(MOTO_BIN2_IOMUX);
 
-    DL_GPIO_initDigitalInputFeatures(ENCODER_EB2_IOMUX,
-		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-
-    DL_GPIO_initDigitalInputFeatures(ENCODER_EB1_IOMUX,
-		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-
-    DL_GPIO_clearPins(GPIOA, MOTO_AIN1_PIN |
+    DL_GPIO_clearPins(MOTO_PORT, MOTO_AIN1_PIN |
 		MOTO_AIN2_PIN |
 		MOTO_BIN1_PIN |
 		MOTO_BIN2_PIN);
-    DL_GPIO_enableOutput(GPIOA, MOTO_AIN1_PIN |
+    DL_GPIO_enableOutput(MOTO_PORT, MOTO_AIN1_PIN |
 		MOTO_AIN2_PIN |
 		MOTO_BIN1_PIN |
 		MOTO_BIN2_PIN);
-    DL_GPIO_clearPins(STBY_PORT, STBY_STBY3_PIN);
-    DL_GPIO_enableOutput(STBY_PORT, STBY_STBY3_PIN);
+    DL_GPIO_clearPins(GPIOB, STBY_STBY3_PIN);
+    DL_GPIO_enableOutput(GPIOB, STBY_STBY3_PIN);
 
 }
 
@@ -217,7 +219,7 @@ static const DL_TimerA_ClockConfig gPWM_0ClockConfig = {
 
 static const DL_TimerA_PWMConfig gPWM_0Config = {
     .pwmMode = DL_TIMER_PWM_MODE_EDGE_ALIGN,
-    .period = 1000,
+    .period = 200,
     .isTimerWithFourCC = false,
     .startTimer = DL_TIMER_START,
 };
@@ -235,14 +237,14 @@ SYSCONFIG_WEAK void SYSCFG_DL_PWM_0_init(void) {
 		DL_TIMERA_CAPTURE_COMPARE_0_INDEX);
 
     DL_TimerA_setCaptCompUpdateMethod(PWM_0_INST, DL_TIMER_CC_UPDATE_METHOD_IMMEDIATE, DL_TIMERA_CAPTURE_COMPARE_0_INDEX);
-    DL_TimerA_setCaptureCompareValue(PWM_0_INST, 1000, DL_TIMER_CC_0_INDEX);
+    DL_TimerA_setCaptureCompareValue(PWM_0_INST, 200, DL_TIMER_CC_0_INDEX);
 
     DL_TimerA_setCaptureCompareOutCtl(PWM_0_INST, DL_TIMER_CC_OCTL_INIT_VAL_LOW,
 		DL_TIMER_CC_OCTL_INV_OUT_DISABLED, DL_TIMER_CC_OCTL_SRC_FUNCVAL,
 		DL_TIMERA_CAPTURE_COMPARE_1_INDEX);
 
     DL_TimerA_setCaptCompUpdateMethod(PWM_0_INST, DL_TIMER_CC_UPDATE_METHOD_IMMEDIATE, DL_TIMERA_CAPTURE_COMPARE_1_INDEX);
-    DL_TimerA_setCaptureCompareValue(PWM_0_INST, 1000, DL_TIMER_CC_1_INDEX);
+    DL_TimerA_setCaptureCompareValue(PWM_0_INST, 200, DL_TIMER_CC_1_INDEX);
 
     DL_TimerA_enableClock(PWM_0_INST);
 
@@ -403,3 +405,41 @@ SYSCONFIG_WEAK void SYSCFG_DL_BT_init(void)
     DL_UART_Main_enable(BT_INST);
 }
 
+/* BAT_ADC Initialization */
+static const DL_ADC12_ClockConfig gBAT_ADCClockConfig = {
+    .clockSel       = DL_ADC12_CLOCK_ULPCLK,
+    .divideRatio    = DL_ADC12_CLOCK_DIVIDE_8,
+    .freqRange      = DL_ADC12_CLOCK_FREQ_RANGE_24_TO_32,
+};
+SYSCONFIG_WEAK void SYSCFG_DL_BAT_ADC_init(void)
+{
+    DL_ADC12_setClockConfig(BAT_ADC_INST, (DL_ADC12_ClockConfig *) &gBAT_ADCClockConfig);
+    DL_ADC12_configConversionMem(BAT_ADC_INST, BAT_ADC_ADCMEM_0,
+        DL_ADC12_INPUT_CHAN_2, DL_ADC12_REFERENCE_VOLTAGE_VDDA, DL_ADC12_SAMPLE_TIMER_SOURCE_SCOMP0, DL_ADC12_AVERAGING_MODE_DISABLED,
+        DL_ADC12_BURN_OUT_SOURCE_DISABLED, DL_ADC12_TRIGGER_MODE_AUTO_NEXT, DL_ADC12_WINDOWS_COMP_MODE_DISABLED);
+    DL_ADC12_setPowerDownMode(BAT_ADC_INST,DL_ADC12_POWER_DOWN_MODE_MANUAL);
+    DL_ADC12_setSampleTime0(BAT_ADC_INST,500);
+    DL_ADC12_enableConversions(BAT_ADC_INST);
+}
+
+SYSCONFIG_WEAK void SYSCFG_DL_WWDT0_init(void)
+{
+    /*
+     * Initialize WWDT0 in Watchdog mode with following settings
+     *   Watchdog Source Clock = (LFCLK Freq) / (WWDT Clock Divider)
+     *                         = 32768Hz / 4 = 8.19 kHz
+     *   Watchdog Period       = (WWDT Clock Divider) ∗ (WWDT Period Count) / 32768Hz
+     *                         = 4 * 2^12 / 32768Hz = 500.00 ms
+     *   Window0 Closed Period = (WWDT Period) * (Window0 Closed Percent)
+     *                         = 500.00 ms * 0% = 0.00 s
+     *   Window1 Closed Period = (WWDT Period) * (Window1 Closed Percent)
+     *                         = 500.00 ms * 0% = 0.00 s
+     */
+    DL_WWDT_initWatchdogMode(WWDT0_INST, DL_WWDT_CLOCK_DIVIDE_4,
+        DL_WWDT_TIMER_PERIOD_12_BITS, DL_WWDT_RUN_IN_SLEEP,
+        DL_WWDT_WINDOW_PERIOD_0, DL_WWDT_WINDOW_PERIOD_0);
+
+    /* Set Window0 as active window */
+    DL_WWDT_setActiveWindow(WWDT0_INST, DL_WWDT_WINDOW0);
+
+}

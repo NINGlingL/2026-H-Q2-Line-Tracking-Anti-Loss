@@ -181,12 +181,30 @@ extern "C" {
 
 
 
+/* Defines for BAT_ADC */
+#define BAT_ADC_INST                                                        ADC1
+#define BAT_ADC_INST_IRQHandler                                  ADC1_IRQHandler
+#define BAT_ADC_INST_INT_IRQN                                    (ADC1_INT_IRQn)
+#define BAT_ADC_ADCMEM_0                                      DL_ADC12_MEM_IDX_0
+#define BAT_ADC_ADCMEM_0_REF                     DL_ADC12_REFERENCE_VOLTAGE_VDDA
+#define BAT_ADC_ADCMEM_0_REF_VOLTAGE_V                                       3.3
+#define GPIO_BAT_ADC_C2_PORT                                               GPIOA
+#define GPIO_BAT_ADC_C2_PIN                                       DL_GPIO_PIN_17
+
+
+
 /* Port definition for Pin Group STBY */
 #define STBY_PORT                                                        (GPIOB)
 
 /* Defines for STBY3: GPIOB.14 with pinCMx 31 on package pin 2 */
 #define STBY_STBY3_PIN                                          (DL_GPIO_PIN_14)
 #define STBY_STBY3_IOMUX                                         (IOMUX_PINCM31)
+/* Port definition for Pin Group KEY */
+#define KEY_PORT                                                         (GPIOB)
+
+/* Defines for START: GPIOB.21 with pinCMx 49 on package pin 20 */
+#define KEY_START_PIN                                           (DL_GPIO_PIN_21)
+#define KEY_START_IOMUX                                          (IOMUX_PINCM49)
 /* Port definition for Pin Group MOTO */
 #define MOTO_PORT                                                        (GPIOA)
 
@@ -202,15 +220,12 @@ extern "C" {
 /* Defines for BIN2: GPIOA.13 with pinCMx 35 on package pin 6 */
 #define MOTO_BIN2_PIN                                           (DL_GPIO_PIN_13)
 #define MOTO_BIN2_IOMUX                                          (IOMUX_PINCM35)
-/* Port definition for Pin Group ENCODER */
-#define ENCODER_PORT                                                     (GPIOA)
 
-/* Defines for EB2: GPIOA.17 with pinCMx 39 on package pin 10 */
-#define ENCODER_EB2_PIN                                         (DL_GPIO_PIN_17)
-#define ENCODER_EB2_IOMUX                                        (IOMUX_PINCM39)
-/* Defines for EB1: GPIOA.16 with pinCMx 38 on package pin 9 */
-#define ENCODER_EB1_PIN                                         (DL_GPIO_PIN_16)
-#define ENCODER_EB1_IOMUX                                        (IOMUX_PINCM38)
+
+/* Defines for WWDT */
+#define WWDT0_INST                                                       (WWDT0)
+#define WWDT0_INT_IRQN                                          (WWDT0_INT_IRQn)
+
 
 /* clang-format on */
 
@@ -224,7 +239,9 @@ void SYSCFG_DL_OLED_init(void);
 void SYSCFG_DL_IMU20948_init(void);
 void SYSCFG_DL_IR8_init(void);
 void SYSCFG_DL_BT_init(void);
+void SYSCFG_DL_BAT_ADC_init(void);
 
+void SYSCFG_DL_WWDT0_init(void);
 
 bool SYSCFG_DL_saveConfiguration(void);
 bool SYSCFG_DL_restoreConfiguration(void);

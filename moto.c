@@ -1,166 +1,146 @@
-/**
- *  TB6612 电机驱动库 实现
- */
 #include "moto.h"
+#include "app_config.h"
+#include "ti_msp_dl_config.h"
 
-/* ========== 内部常量 ========== */
-#define PWM_PERIOD  1000U
+#define PWM_PERIOD_COUNTS (200U)
 
-/* ========== 当前状态 ========== */
-static char    g_moto_dir   = 'S';
-static uint8_t g_moto_speed = 0;
+static Moto_State g_motor;
 
-/*
- *  PWM 极性说明:
- *  SysConfig 生成 TIMG0 的 CC_OCTL = INIT_VAL_LOW
- *  输出: LOW(0..CC) → HIGH(CC..period)
- *  所以 HIGH 占空比 = (period - CC) / period
- *  要用 CC = period - (pct * period / 100) 来补偿
- */
+static uint32_t command_to_compare(int16_t command)
+{
+    uint32_t magnitude;
 
-/* ========== 初始化 ========== */
+    if (command < 0) {
+        magnitude = (uint32_t) (-command);
+    } else {
+        magnitude = (uint32_t) command;
+    }
+    return PWM_PERIOD_COUNTS -
+           (magnitude * PWM_PERIOD_COUNTS / 1000U);
+}
+
+static void set_right_direction(int16_t command)
+{
+    DL_GPIO_clearPins(MOTO_PORT, MOTO_AIN1_PIN | MOTO_AIN2_PIN);
+    if (command > 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_AIN1_PIN);
+    } else if (command < 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_AIN2_PIN);
+    }
+}
+
+static void set_left_direction(int16_t command)
+{
+    DL_GPIO_clearPins(MOTO_PORT, MOTO_BIN1_PIN | MOTO_BIN2_PIN);
+    if (command > 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_BIN1_PIN);
+    } else if (command < 0) {
+        DL_GPIO_setPins(MOTO_PORT, MOTO_BIN2_PIN);
+    }
+}
 
 void Moto_Init(void)
 {
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, PWM_PERIOD, DL_TIMER_CC_0_INDEX);
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, PWM_PERIOD, DL_TIMER_CC_1_INDEX);
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    g_moto_dir   = 'S';
-    g_moto_speed = 0;
+    g_motor.left_permille = 0;
+    g_motor.right_permille = 0;
+    g_motor.safety_permit = 0U;
+    g_motor.standby_enabled = 0U;
+    g_motor.hardware_locked = (APP_MOTOR_HW_READY == 0U) ? 1U : 0U;
+    Moto_EmergencyStop();
 }
 
-/* ========== 辅助: 百分比 → CC 寄存器值 ========== */
-
-static uint32_t pct_to_cc(uint8_t pct)
+void Moto_SetSafetyPermit(uint8_t permit)
 {
-    if (pct > 100) pct = 100;
-    return PWM_PERIOD - ((uint32_t)pct * PWM_PERIOD / 100U);
+    if ((permit == 0U) || (APP_MOTOR_HW_READY == 0U)) {
+        g_motor.safety_permit = 0U;
+        Moto_EmergencyStop();
+        return;
+    }
+    g_motor.safety_permit = 1U;
 }
 
-/* ========== 辅助: 设置 PWM ========== */
-
-static void pwm_set(uint8_t pct)
+void Moto_SetLR(int16_t left_permille, int16_t right_permille)
 {
-    uint32_t cc = pct_to_cc(pct);
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, cc, DL_TIMER_CC_0_INDEX);
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, cc, DL_TIMER_CC_1_INDEX);
-}
+    uint32_t left_compare;
+    uint32_t right_compare;
 
-/* ========== 基本控制 ========== */
+    /*
+     * P0 actuator hard limits are deliberately inline in the function that
+     * writes the physical registers. They do not rely on caller validation.
+     */
+    if (left_permille > 800) {
+        left_permille = 800;
+    }
+    if (left_permille < -800) {
+        left_permille = -800;
+    }
+    if (right_permille > 800) {
+        right_permille = 800;
+    }
+    if (right_permille < -800) {
+        right_permille = -800;
+    }
 
-void Moto_Forward(uint8_t pct)
-{
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    DL_GPIO_setPins(GPIOB, AIN1_PIN_2_PIN | BN1_PIN_1_PIN);
-    pwm_set(pct);
-    g_moto_dir   = 'F';
-    g_moto_speed = (pct > 100) ? 100 : pct;
-}
+    if ((g_motor.safety_permit == 0U) ||
+        (APP_MOTOR_HW_READY == 0U)) {
+        Moto_EmergencyStop();
+        return;
+    }
 
-void Moto_Backward(uint8_t pct)
-{
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    DL_GPIO_setPins(GPIOB, AIN2_PIN_3_PIN | BIN2_PIN_0_PIN);
-    pwm_set(pct);
-    g_moto_dir   = 'B';
-    g_moto_speed = (pct > 100) ? 100 : pct;
-}
+    /*
+     * Remove bridge drive before changing direction to prevent shoot-through
+     * during a sign reversal.
+     */
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_0_INDEX);
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_1_INDEX);
 
-void Moto_Left(uint8_t pct)
-{
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    DL_GPIO_setPins(GPIOB, BN1_PIN_1_PIN);
-    pwm_set(pct);
-    g_moto_dir   = 'L';
-    g_moto_speed = (pct > 100) ? 100 : pct;
-}
+    set_right_direction(right_permille);
+    set_left_direction(left_permille);
 
-void Moto_Right(uint8_t pct)
-{
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    DL_GPIO_setPins(GPIOB, AIN1_PIN_2_PIN);
-    pwm_set(pct);
-    g_moto_dir   = 'R';
-    g_moto_speed = (pct > 100) ? 100 : pct;
+    right_compare = command_to_compare(right_permille);
+    left_compare = command_to_compare(left_permille);
+
+    if (right_compare > PWM_PERIOD_COUNTS) {
+        right_compare = PWM_PERIOD_COUNTS;
+    }
+    if (left_compare > PWM_PERIOD_COUNTS) {
+        left_compare = PWM_PERIOD_COUNTS;
+    }
+
+    DL_GPIO_setPins(STBY_PORT, STBY_STBY3_PIN);
+    g_motor.standby_enabled = 1U;
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, right_compare, DL_TIMER_CC_0_INDEX);
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, left_compare, DL_TIMER_CC_1_INDEX);
+
+    g_motor.left_permille = left_permille;
+    g_motor.right_permille = right_permille;
 }
 
 void Moto_Stop(void)
 {
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, PWM_PERIOD, DL_TIMER_CC_0_INDEX);
-    DL_TimerG_setCaptureCompareValue(PWM_0_INST, PWM_PERIOD, DL_TIMER_CC_1_INDEX);
-    DL_GPIO_clearPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                              BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-    g_moto_dir   = 'S';
-    g_moto_speed = 0;
+    Moto_EmergencyStop();
 }
 
-void Moto_SetSpeed(uint8_t pct)
+void Moto_EmergencyStop(void)
 {
-    pwm_set(pct);
-    g_moto_speed = (pct > 100) ? 100 : pct;
+    /* Minimal safe sequence: PWM zero, STBY low, direction pins low. */
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_0_INDEX);
+    DL_TimerA_setCaptureCompareValue(
+        PWM_0_INST, PWM_PERIOD_COUNTS, DL_TIMER_CC_1_INDEX);
+    DL_GPIO_clearPins(STBY_PORT, STBY_STBY3_PIN);
+    DL_GPIO_clearPins(MOTO_PORT,
+        MOTO_AIN1_PIN | MOTO_AIN2_PIN | MOTO_BIN1_PIN | MOTO_BIN2_PIN);
+    g_motor.left_permille = 0;
+    g_motor.right_permille = 0;
+    g_motor.standby_enabled = 0U;
 }
 
-uint8_t Moto_SpeedUp(uint8_t delta)
+Moto_State Moto_GetState(void)
 {
-    uint16_t ns = g_moto_speed + delta;
-    if (ns > 100) ns = 100;
-    pwm_set((uint8_t)ns);
-    g_moto_speed = (uint8_t)ns;
-    return (uint8_t)ns;
-}
-
-uint8_t Moto_SpeedDown(uint8_t delta)
-{
-    int16_t ns = (int16_t)g_moto_speed - (int16_t)delta;
-    if (ns < 0) ns = 0;
-    pwm_set((uint8_t)ns);
-    g_moto_speed = (uint8_t)ns;
-    if (ns == 0) Moto_Stop();
-    return (uint8_t)ns;
-}
-
-/* ========== 状态查询 ========== */
-
-char    Moto_GetDirection(void) { return g_moto_dir; }
-uint8_t Moto_GetSpeed(void)     { return g_moto_speed; }
-
-uint32_t Moto_GetCC0(void)
-{
-    return DL_TimerG_getCaptureCompareValue(PWM_0_INST, DL_TIMER_CC_0_INDEX);
-}
-
-uint32_t Moto_GetCC1(void)
-{
-    return DL_TimerG_getCaptureCompareValue(PWM_0_INST, DL_TIMER_CC_1_INDEX);
-}
-
-uint32_t Moto_GetGPIO(void)
-{
-    return DL_GPIO_readPins(GPIOB, AIN2_PIN_3_PIN | AIN1_PIN_2_PIN |
-                                    BIN2_PIN_0_PIN | BN1_PIN_1_PIN);
-}
-
-/* ========== 开机自检 ========== */
-
-void Moto_SelfTest(Moto_SelfTestCallback cb)
-{
-    if (cb) cb(1, 80, 1);
-    Moto_Forward(80);
-    delay_cycles(CPUCLK_FREQ * 1);
-
-    if (cb) cb(2, 50, 2);
-    Moto_SetSpeed(50);
-    delay_cycles(CPUCLK_FREQ * 2);
-
-    if (cb) cb(3, 20, 2);
-    Moto_SetSpeed(20);
-    delay_cycles(CPUCLK_FREQ * 2);
-
-    Moto_Stop();
-    if (cb) cb(0, 0, 0);
+    return g_motor;
 }
