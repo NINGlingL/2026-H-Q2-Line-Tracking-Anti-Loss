@@ -23,10 +23,9 @@
 #define APP_ENABLE_BLUETOOTH           (0U)
 #define APP_ENABLE_BATTERY_ADC         (0U)
 
-/* User-confirmed timing and actuator limits. */
+/* User-confirmed timing. Runtime car tuning is at the top of empty.c. */
 #define APP_CONTROL_PERIOD_MS          (10U)
 #define APP_I2C_TIMEOUT_MS             (10U)
-#define APP_PWM_MAX_PERMILLE           (700)
 
 /*
  * WHEELTEC D153C onboard battery divider:
@@ -50,11 +49,6 @@
 #define APP_IR_WARMUP_MS               (20000UL)
 #define APP_IR_FRAME_TIMEOUT_MS        (150UL)
 
-/* Faster straights, reduced corner speed, and a 70% absolute ceiling. */
-#define APP_DIAG_PWM_PERMILLE          (200)
-#define APP_AUTO_BASE_PWM_PERMILLE     (450)
-#define APP_AUTO_STRAIGHT_PWM_PERMILLE (550)
-
 /*
  * User-confirmed MG513XP28_12V with Hall encoder and 65 mm wheel:
  *   13 PPR * 28:1 gearbox * 4x quadrature = 1456 counts/wheel revolution.
@@ -68,7 +62,6 @@
 #define APP_WHEEL_DIAMETER_MM          (65UL)
 #define APP_WHEEL_CIRCUMFERENCE_UM     (204204UL)
 #define APP_MOTOR_MAX_VALID_RPM        (500UL)
-#define APP_AUTO_TARGET_SPEED_MM_S     (300)
 
 /* x1-left is provisional; Bluetooth command "IRREV 1" reverses it. */
 #define APP_IR_REVERSED_DEFAULT        (0U)

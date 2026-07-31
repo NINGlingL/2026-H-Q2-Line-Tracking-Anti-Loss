@@ -4,11 +4,6 @@
 
 #define PWM_PERIOD_COUNTS (200U)
 
-/* Keep an actuator-layer ceiling even if a caller or PID is misconfigured. */
-#if APP_PWM_MAX_PERMILLE > 700
-#error "Motor output above 70 percent is not permitted"
-#endif
-
 static Moto_State g_motor;
 
 static uint32_t command_to_compare(int16_t command)

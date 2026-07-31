@@ -13,15 +13,8 @@
 #include <string.h>
 
 #define DIAGNOSTIC_TIMEOUT_MS (30000UL)
-#define AUTO_TIMEOUT_MS       (35000UL)
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
-#define YAW_RATE_PER_POSITION (5.0f)
-#define START_MARKER_MIN_LAP_MS  (5000UL)
-#define START_MARKER_CLEAR_MS    (80UL)
-#define LINE_FILTER_ALPHA        (0.25f)
-#define LINE_CENTER_DEADBAND     (1.25f)
-#define STRAIGHT_YAW_RATE_DPS    (10.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -62,6 +55,66 @@ static const char *mode_name(Control_Mode mode)
     }
 }
 
+static int16_t configured_pwm_limit(void)
+{
+    if (g_control_tuning.pwm_limit_permille < 0) {
+        return 0;
+    }
+    if (g_control_tuning.pwm_limit_permille > 700) {
+        return 700;
+    }
+    return g_control_tuning.pwm_limit_permille;
+}
+
+static int16_t configured_pwm_value(int16_t value)
+{
+    int16_t limit = configured_pwm_limit();
+
+    if (value < 0) {
+        return 0;
+    }
+    if (value > limit) {
+        return limit;
+    }
+    return value;
+}
+
+static float configured_filter_alpha(void)
+{
+    if (!isfinite(g_control_tuning.line_filter_alpha) ||
+        g_control_tuning.line_filter_alpha <= 0.0f ||
+        g_control_tuning.line_filter_alpha > 1.0f) {
+        return 0.25f;
+    }
+    return g_control_tuning.line_filter_alpha;
+}
+
+static uint8_t configured_marker_count(void)
+{
+    if (g_control_tuning.marker_active_count < 1U) {
+        return 1U;
+    }
+    if (g_control_tuning.marker_active_count > 8U) {
+        return 8U;
+    }
+    return g_control_tuning.marker_active_count;
+}
+
+static int16_t startup_pwm_cap(uint32_t elapsed_ms)
+{
+    int16_t limit = configured_pwm_limit();
+    int16_t start = configured_pwm_value(
+        g_control_tuning.start_pwm_permille);
+    uint32_t ramp_ms = g_control_tuning.start_ramp_ms;
+    uint64_t rise;
+
+    if (ramp_ms == 0U || elapsed_ms >= ramp_ms || start >= limit) {
+        return limit;
+    }
+    rise = (uint64_t) (uint16_t) (limit - start) * elapsed_ms;
+    return (int16_t) (start + (int16_t) (rise / ramp_ms));
+}
+
 static uint8_t start_marker_detected(const EightIR_State *ir)
 {
     /*
@@ -69,7 +122,7 @@ static uint8_t start_marker_detected(const EightIR_State *ir)
      * active detectors here so UART channel order or IR reversal cannot
      * hide the marker; a normal 1.8 cm guide line activates far fewer.
      */
-    return (ir->active_count >= 5U) ? 1U : 0U;
+    return (ir->active_count >= configured_marker_count()) ? 1U : 0U;
 }
 
 static void enter_safe(const char *reason, uint32_t now_ms)
@@ -214,10 +267,10 @@ static void handle_command(uint8_t byte, uint32_t now_ms)
                 (int16_t) -g_diag_power, "SPIN RIGHT", now_ms);
             break;
         case '+':
-            if (g_diag_power < APP_PWM_MAX_PERMILLE - 50) {
+            if (g_diag_power < configured_pwm_limit() - 50) {
                 g_diag_power += 50;
             } else {
-                g_diag_power = APP_PWM_MAX_PERMILLE;
+                g_diag_power = configured_pwm_limit();
             }
             refresh_manual_power();
             (void) snprintf(g_last_command, sizeof(g_last_command),
@@ -307,14 +360,17 @@ static void run_auto(uint32_t now_ms)
     float yaw_assist = 0.0f;
     float desired_yaw_rate;
     float line_error;
-    float base = (float) APP_AUTO_BASE_PWM_PERMILLE;
+    float base = (float) configured_pwm_value(
+        g_control_tuning.curve_pwm_permille);
     float speed_feedback;
+    int16_t output_limit = configured_pwm_limit();
+    int16_t ramp_limit;
     int16_t left;
     int16_t right;
 
     g_auto_elapsed_ms = (uint32_t) (now_ms - g_control.mode_enter_ms);
 
-    if (g_auto_elapsed_ms > AUTO_TIMEOUT_MS) {
+    if (g_auto_elapsed_ms > g_control_tuning.auto_timeout_ms) {
         enter_safe("AUTO TIMEOUT", now_ms);
         return;
     }
@@ -328,7 +384,8 @@ static void run_auto(uint32_t now_ms)
             g_line_lost_ms = now_ms;
         }
         Moto_EmergencyStop();
-        if ((uint32_t) (now_ms - g_line_lost_ms) >= 50U) {
+        if ((uint32_t) (now_ms - g_line_lost_ms) >=
+            g_control_tuning.line_lost_stop_ms) {
             enter_safe("LINE LOST", now_ms);
         }
         return;
@@ -344,13 +401,13 @@ static void run_auto(uint32_t now_ms)
             if (g_marker_clear_ms == 0U) {
                 g_marker_clear_ms = now_ms;
             } else if ((uint32_t) (now_ms - g_marker_clear_ms) >=
-                       START_MARKER_CLEAR_MS) {
+                       g_control_tuning.marker_clear_ms) {
                 g_start_marker_armed = 1U;
             }
         } else {
             g_marker_clear_ms = 0U;
         }
-    } else if (g_auto_elapsed_ms >= START_MARKER_MIN_LAP_MS &&
+    } else if (g_auto_elapsed_ms >= g_control_tuning.marker_min_lap_ms &&
                start_marker_detected(&ir) != 0U) {
         /* One valid UART frame is enough; the narrow marker passes quickly. */
         g_control.lap_count = 1U;
@@ -358,17 +415,20 @@ static void run_auto(uint32_t now_ms)
         return;
     }
 
-    g_filtered_line_position += LINE_FILTER_ALPHA *
+    g_filtered_line_position += configured_filter_alpha() *
         ((float) ir.position - g_filtered_line_position);
     line_error = g_filtered_line_position;
-    if (fabsf(line_error) < LINE_CENTER_DEADBAND) {
+    if (isfinite(g_control_tuning.line_center_deadband) &&
+        fabsf(line_error) < fabsf(g_control_tuning.line_center_deadband)) {
         line_error = 0.0f;
     }
 
     if (line_error == 0.0f && ir.active_count <= 3U &&
         (g_imu.valid == 0U || g_imu.stale != 0U ||
-         fabsf(g_imu.yaw_rate_dps) < STRAIGHT_YAW_RATE_DPS)) {
-        base = (float) APP_AUTO_STRAIGHT_PWM_PERMILLE;
+         fabsf(g_imu.yaw_rate_dps) <
+             fabsf(g_control_tuning.straight_yaw_rate_dps))) {
+        base = (float) configured_pwm_value(
+            g_control_tuning.straight_pwm_permille);
     }
 
     if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
@@ -389,26 +449,31 @@ static void run_auto(uint32_t now_ms)
      */
     if (line_error != 0.0f && g_imu.valid != 0U && g_imu.stale == 0U &&
         g_imu.calibrated != 0U && isfinite(g_imu.yaw_rate_dps)) {
-        desired_yaw_rate = line_error * YAW_RATE_PER_POSITION;
+        desired_yaw_rate =
+            line_error * g_control_tuning.yaw_rate_per_position;
         yaw_assist = PID_Update(&g_yaw_pid,
             desired_yaw_rate - g_imu.yaw_rate_dps, 0.010f);
     } else {
         PID_Reset(&g_yaw_pid);
     }
     correction += yaw_assist;
-    if (correction > (float) APP_PWM_MAX_PERMILLE) {
-        correction = (float) APP_PWM_MAX_PERMILLE;
+    if (correction > (float) output_limit) {
+        correction = (float) output_limit;
     }
-    if (correction < (float) -APP_PWM_MAX_PERMILLE) {
-        correction = (float) -APP_PWM_MAX_PERMILLE;
+    if (correction < (float) -output_limit) {
+        correction = (float) -output_limit;
     }
 
     left = (int16_t) (base + correction);
     right = (int16_t) (base - correction);
-    if (left > APP_PWM_MAX_PERMILLE) left = APP_PWM_MAX_PERMILLE;
+    if (left > output_limit) left = output_limit;
     if (left < 0) left = 0;
-    if (right > APP_PWM_MAX_PERMILLE) right = APP_PWM_MAX_PERMILLE;
+    if (right > output_limit) right = output_limit;
     if (right < 0) right = 0;
+
+    ramp_limit = startup_pwm_cap(g_auto_elapsed_ms);
+    if (left > ramp_limit) left = ramp_limit;
+    if (right > ramp_limit) right = ramp_limit;
 
     g_control.left_command = left;
     g_control.right_command = right;
@@ -497,17 +562,20 @@ void Control_Init(uint32_t now_ms)
 {
     memset(&g_control, 0, sizeof(g_control));
     memset(&g_imu, 0, sizeof(g_imu));
-    PID_Init(&g_line_pid, 7.0f, 0.2f, 0.04f,
+    PID_Init(&g_line_pid, g_control_tuning.line_kp,
+        g_control_tuning.line_ki, g_control_tuning.line_kd,
         20.0f, 110.0f, 4.0f);
     PID_Init(&g_speed_pid, 0.45f, 0.40f, 0.0f,
         150.0f, 140.0f, 200.0f);
-    PID_Init(&g_yaw_pid, 0.8f, 0.02f, 0.0f,
+    PID_Init(&g_yaw_pid, g_control_tuning.yaw_kp,
+        g_control_tuning.yaw_ki, 0.0f,
         30.0f, 30.0f, 60.0f);
     g_control.mode = CONTROL_SAFE;
-    g_control.speed_target_mm_s = APP_AUTO_TARGET_SPEED_MM_S;
+    g_control.speed_target_mm_s = g_control_tuning.speed_target_mm_s;
     g_control.hardware_locked = (APP_MOTOR_HW_READY == 0U) ? 1U : 0U;
     g_control.mode_enter_ms = now_ms;
-    g_diag_power = APP_DIAG_PWM_PERMILLE;
+    g_diag_power = configured_pwm_value(
+        g_control_tuning.diagnostic_pwm_permille);
     g_last_control_ms = now_ms;
     g_last_oled_ms = now_ms;
     g_last_oled_recovery_ms = now_ms;
