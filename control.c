@@ -16,10 +16,12 @@
 #define AUTO_TIMEOUT_MS       (35000UL)
 #define OLED_PERIOD_MS        (125UL)
 #define IMU_PERIOD_MS         (20UL)
+#define YAW_RATE_PER_POSITION (5.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
 static PID_Controller g_speed_pid;
+static PID_Controller g_yaw_pid;
 static IMU_Data g_imu;
 static int16_t g_diag_power;
 static int16_t g_manual_left;
@@ -57,6 +59,7 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     Moto_EmergencyStop();
     PID_Reset(&g_line_pid);
     PID_Reset(&g_speed_pid);
+    PID_Reset(&g_yaw_pid);
     g_control.mode = CONTROL_SAFE;
     g_control.left_command = 0;
     g_control.right_command = 0;
@@ -111,6 +114,7 @@ static void enter_auto(uint32_t now_ms)
     Moto_SetSafetyPermit(1U);
     PID_Reset(&g_line_pid);
     PID_Reset(&g_speed_pid);
+    PID_Reset(&g_yaw_pid);
     g_control.mode = CONTROL_AUTO_TRACK;
     g_control.mode_enter_ms = now_ms;
     g_control.lap_count = 0U;
@@ -277,6 +281,8 @@ static void run_auto(uint32_t now_ms)
     EightIR_State ir = EightIR_GetState();
     Encoder_State encoder = Encoder_GetState();
     float correction;
+    float yaw_assist = 0.0f;
+    float desired_yaw_rate;
     float base = (float) APP_AUTO_BASE_PWM_PERMILLE;
     float speed_feedback;
     int16_t left;
@@ -315,6 +321,28 @@ static void run_auto(uint32_t now_ms)
 
     correction =
         PID_Update(&g_line_pid, (float) ir.position, 0.010f);
+
+    /*
+     * The line position requests a turn rate. The filtered Z gyro closes a
+     * second loop around that request, damping oscillation without relying
+     * on the drifting absolute yaw angle.
+     */
+    if (g_imu.valid != 0U && g_imu.stale == 0U &&
+        g_imu.calibrated != 0U && isfinite(g_imu.yaw_rate_dps)) {
+        desired_yaw_rate =
+            (float) ir.position * YAW_RATE_PER_POSITION;
+        yaw_assist = PID_Update(&g_yaw_pid,
+            desired_yaw_rate - g_imu.yaw_rate_dps, 0.010f);
+    } else {
+        PID_Reset(&g_yaw_pid);
+    }
+    correction += yaw_assist;
+    if (correction > (float) APP_PWM_MAX_PERMILLE) {
+        correction = (float) APP_PWM_MAX_PERMILLE;
+    }
+    if (correction < (float) -APP_PWM_MAX_PERMILLE) {
+        correction = (float) -APP_PWM_MAX_PERMILLE;
+    }
 
     left = (int16_t) (base + correction);
     right = (int16_t) (base - correction);
@@ -404,10 +432,12 @@ void Control_Init(uint32_t now_ms)
 {
     memset(&g_control, 0, sizeof(g_control));
     memset(&g_imu, 0, sizeof(g_imu));
-    PID_Init(&g_line_pid, 38.0f, 1.0f, 0.8f,
-        30.0f, 260.0f, 4.0f);
-    PID_Init(&g_speed_pid, 0.6f, 0.25f, 0.0f,
-        200.0f, 180.0f, 150.0f);
+    PID_Init(&g_line_pid, 8.0f, 0.3f, 0.12f,
+        20.0f, 70.0f, 4.0f);
+    PID_Init(&g_speed_pid, 0.25f, 0.05f, 0.0f,
+        100.0f, 20.0f, 80.0f);
+    PID_Init(&g_yaw_pid, 0.8f, 0.02f, 0.0f,
+        30.0f, 30.0f, 60.0f);
     g_control.mode = CONTROL_SAFE;
     g_control.speed_target_mm_s = APP_AUTO_TARGET_SPEED_MM_S;
     g_control.hardware_locked = (APP_MOTOR_HW_READY == 0U) ? 1U : 0U;

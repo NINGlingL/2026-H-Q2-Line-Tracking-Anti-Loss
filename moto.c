@@ -68,17 +68,17 @@ void Moto_SetLR(int16_t left_permille, int16_t right_permille)
      * P0 actuator hard limits are deliberately inline in the function that
      * writes the physical registers. They do not rely on caller validation.
      */
-    if (left_permille > 800) {
-        left_permille = 800;
+    if (left_permille > 100) {
+        left_permille = 100;
     }
-    if (left_permille < -800) {
-        left_permille = -800;
+    if (left_permille < -100) {
+        left_permille = -100;
     }
-    if (right_permille > 800) {
-        right_permille = 800;
+    if (right_permille > 100) {
+        right_permille = 100;
     }
-    if (right_permille < -800) {
-        right_permille = -800;
+    if (right_permille < -100) {
+        right_permille = -100;
     }
 
     if ((g_motor.safety_permit == 0U) ||
