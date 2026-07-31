@@ -50,7 +50,7 @@
 #define APP_IR_FRAME_TIMEOUT_MS        (150UL)
 
 /* Conservative first bench-test values, tunable through Bluetooth. */
-#define APP_DIAG_PWM_PERMILLE          (250)
+#define APP_DIAG_PWM_PERMILLE          (600)
 #define APP_AUTO_BASE_PWM_PERMILLE     (300)
 
 /*

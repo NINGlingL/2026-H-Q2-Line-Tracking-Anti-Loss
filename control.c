@@ -456,8 +456,9 @@ static void draw_oled(void)
     SSD1306_ShowString(3U, 0U, line);
     (void) snprintf(line, sizeof(line), "KEY:%s", g_last_command);
     SSD1306_ShowString(4U, 0U, line);
-    (void) snprintf(line, sizeof(line), "M:%s L:%d R:%d",
+    (void) snprintf(line, sizeof(line), "M:%s E:%u L:%d R:%d",
         mode_name(g_control.mode),
+        motor.standby_enabled,
         motor.left_permille / 10, motor.right_permille / 10);
     SSD1306_ShowString(5U, 0U, line);
     (void) snprintf(line, sizeof(line), "BAT:%lumV",
