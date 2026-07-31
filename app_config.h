@@ -21,6 +21,7 @@
 #define APP_ENABLE_OLED                (1U)
 #define APP_ENABLE_IMU                 (1U)
 #define APP_ENABLE_BLUETOOTH           (0U)
+#define APP_ENABLE_BATTERY_ADC         (0U)
 
 /* User-confirmed timing and actuator limits. */
 #define APP_CONTROL_PERIOD_MS          (10U)
@@ -51,7 +52,7 @@
 
 /* Conservative first bench-test values, tunable through Bluetooth. */
 #define APP_DIAG_PWM_PERMILLE          (600)
-#define APP_AUTO_BASE_PWM_PERMILLE     (300)
+#define APP_AUTO_BASE_PWM_PERMILLE     (650)
 
 /*
  * User-confirmed MG513XP28_12V with Hall encoder and 65 mm wheel:
@@ -66,7 +67,7 @@
 #define APP_WHEEL_DIAMETER_MM          (65UL)
 #define APP_WHEEL_CIRCUMFERENCE_UM     (204204UL)
 #define APP_MOTOR_MAX_VALID_RPM        (500UL)
-#define APP_AUTO_TARGET_SPEED_MM_S     (250)
+#define APP_AUTO_TARGET_SPEED_MM_S     (350)
 
 /* x1-left is provisional; Bluetooth command "IRREV 1" reverses it. */
 #define APP_IR_REVERSED_DEFAULT        (0U)

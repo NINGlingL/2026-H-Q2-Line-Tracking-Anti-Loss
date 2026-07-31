@@ -1,6 +1,5 @@
 #include "control.h"
 #include "app_config.h"
-#include "battery.h"
 #include "eight_ir.h"
 #include "encoder.h"
 #include "icm20948.h"
@@ -31,42 +30,10 @@ static uint32_t g_last_oled_recovery_ms;
 static uint32_t g_last_imu_ms;
 static uint32_t g_imu_period_ms;
 static uint32_t g_line_lost_ms;
-static uint8_t g_crossline_seen;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
 static uint32_t g_button_change_ms;
 static char g_last_command[22];
-
-static int16_t apply_battery_feedforward(int16_t command)
-{
-    Battery_State battery = Battery_GetState();
-    float gain;
-    float compensated;
-
-    if (battery.millivolts < APP_BATTERY_VALID_MIN_MV ||
-        battery.millivolts > APP_BATTERY_VALID_MAX_MV) {
-        return 0;
-    }
-    gain = (float) APP_BATTERY_NOMINAL_MV /
-           (float) battery.millivolts;
-    if (gain > 1.5f) {
-        gain = 1.5f;
-    }
-    if (gain < 0.5f) {
-        gain = 0.5f;
-    }
-    compensated = (float) command * gain;
-    if (!isfinite(compensated)) {
-        return 0;
-    }
-    if (compensated > (float) APP_PWM_MAX_PERMILLE) {
-        compensated = (float) APP_PWM_MAX_PERMILLE;
-    }
-    if (compensated < (float) -APP_PWM_MAX_PERMILLE) {
-        compensated = (float) -APP_PWM_MAX_PERMILLE;
-    }
-    return (int16_t) compensated;
-}
 
 static const char *mode_name(Control_Mode mode)
 {
@@ -102,29 +69,19 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     }
 }
 
-static const char *motion_lock_reason(uint8_t allow_last_sample)
+static const char *motion_lock_reason(void)
 {
     Moto_State motor = Moto_GetState();
-    Battery_State battery = Battery_GetState();
 
     if (motor.hardware_locked != 0U) {
         return "LOCK:HW";
-    }
-    if (battery.configured == 0U ||
-        (battery.valid == 0U &&
-         (allow_last_sample == 0U || Battery_IsBenchSafe() == 0U))) {
-        return "LOCK:BAT ADC";
-    }
-    if (battery.low_latched != 0U ||
-        battery.millivolts <= APP_BATTERY_LOW_MV) {
-        return "LOCK:BAT LOW";
     }
     return NULL;
 }
 
 static void enter_diagnostic(uint32_t now_ms)
 {
-    const char *lock_reason = motion_lock_reason(1U);
+    const char *lock_reason = motion_lock_reason();
 
     if (lock_reason != NULL) {
         enter_safe(lock_reason, now_ms);
@@ -141,8 +98,7 @@ static void enter_diagnostic(uint32_t now_ms)
 static void enter_auto(uint32_t now_ms)
 {
     EightIR_State ir = EightIR_GetState();
-    Encoder_State encoder = Encoder_GetState();
-    const char *lock_reason = motion_lock_reason(0U);
+    const char *lock_reason = motion_lock_reason();
 
     if (lock_reason != NULL) {
         enter_safe(lock_reason, now_ms);
@@ -152,12 +108,6 @@ static void enter_auto(uint32_t now_ms)
         enter_safe("AUTO:NO LINE", now_ms);
         return;
     }
-    if (encoder.valid == 0U ||
-        (uint32_t) (now_ms - encoder.sample_ms) > 30U) {
-        enter_safe("AUTO:ENC ERR", now_ms);
-        return;
-    }
-
     Moto_SetSafetyPermit(1U);
     PID_Reset(&g_line_pid);
     PID_Reset(&g_speed_pid);
@@ -165,7 +115,6 @@ static void enter_auto(uint32_t now_ms)
     g_control.mode_enter_ms = now_ms;
     g_control.lap_count = 0U;
     g_line_lost_ms = 0U;
-    g_crossline_seen = 0U;
     (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
 }
 
@@ -306,15 +255,6 @@ static void service_button(uint32_t now_ms)
     uint8_t raw =
         (DL_GPIO_readPins(KEY_PORT, KEY_START_PIN) == 0U) ? 0U : 1U;
 
-    /* Release always wins over debounce so a point-run command stops now. */
-    if (raw != 0U && g_button_stable == 0U) {
-        g_button_last_raw = 1U;
-        g_button_stable = 1U;
-        g_button_change_ms = now_ms;
-        enter_safe("KEY STOP", now_ms);
-        return;
-    }
-
     if (raw != g_button_last_raw) {
         g_button_last_raw = raw;
         g_button_change_ms = now_ms;
@@ -323,10 +263,11 @@ static void service_button(uint32_t now_ms)
         raw != g_button_stable) {
         g_button_stable = raw;
         if (raw == 0U) {
-            set_manual_motion(
-                g_diag_power, g_diag_power, "KEY FWD", now_ms);
-        } else {
-            enter_safe("KEY STOP", now_ms);
+            if (g_control.mode == CONTROL_AUTO_TRACK) {
+                enter_safe("KEY STOP", now_ms);
+            } else {
+                enter_auto(now_ms);
+            }
         }
     }
 }
@@ -346,17 +287,8 @@ static void run_auto(uint32_t now_ms)
         enter_safe("AUTO TIMEOUT", now_ms);
         return;
     }
-    if (Battery_IsSafe() == 0U) {
-        enter_safe("BAT FAULT", now_ms);
-        return;
-    }
     if (ir.frame_fresh == 0U) {
         enter_safe("IR STALE", now_ms);
-        return;
-    }
-    if (encoder.valid == 0U ||
-        (uint32_t) (now_ms - encoder.sample_ms) > 30U) {
-        enter_safe("ENC FAULT", now_ms);
         return;
     }
 
@@ -372,22 +304,13 @@ static void run_auto(uint32_t now_ms)
     }
     g_line_lost_ms = 0U;
 
-    if ((uint32_t) (now_ms - g_control.mode_enter_ms) > 1000U) {
-        if (ir.active_count >= 6U && g_crossline_seen == 0U) {
-            g_crossline_seen = 1U;
-            g_control.lap_count++;
-            enter_safe("LAP COMPLETE", now_ms);
-            return;
-        }
-        if (ir.active_count <= 3U) {
-            g_crossline_seen = 0U;
-        }
-    }
-
-    if (g_control.speed_target_mm_s > 0) {
+    if (g_control.speed_target_mm_s > 0 && encoder.valid != 0U &&
+        (uint32_t) (now_ms - encoder.sample_ms) <= 30U) {
         speed_feedback = fabsf((float) encoder.speed_mm_s);
         base += PID_Update(&g_speed_pid,
             (float) g_control.speed_target_mm_s - speed_feedback, 0.010f);
+    } else {
+        PID_Reset(&g_speed_pid);
     }
 
     correction =
@@ -402,9 +325,7 @@ static void run_auto(uint32_t now_ms)
 
     g_control.left_command = left;
     g_control.right_command = right;
-    Moto_SetLR(
-        apply_battery_feedforward(left),
-        apply_battery_feedforward(right));
+    Moto_SetLR(left, right);
 }
 
 static void run_diagnostic(uint32_t now_ms)
@@ -414,22 +335,16 @@ static void run_diagnostic(uint32_t now_ms)
         enter_safe("DIAG TIMEOUT", now_ms);
         return;
     }
-    if (Battery_IsBenchSafe() == 0U) {
-        enter_safe("BAT FAULT", now_ms);
-        return;
-    }
     g_control.left_command = g_manual_left;
     g_control.right_command = g_manual_right;
-    Moto_SetLR(
-        apply_battery_feedforward(g_manual_left),
-        apply_battery_feedforward(g_manual_right));
+    Moto_SetLR(g_manual_left, g_manual_right);
 }
 
 static void draw_oled(void)
 {
     EightIR_State ir = EightIR_GetState();
     Moto_State motor = Moto_GetState();
-    Battery_State battery = Battery_GetState();
+    Encoder_State encoder = Encoder_GetState();
     char bits[12];
     char track[12];
     char line[22];
@@ -479,9 +394,8 @@ static void draw_oled(void)
         motor.standby_enabled,
         motor.left_permille / 10, motor.right_permille / 10);
     SSD1306_ShowString(5U, 0U, line);
-    (void) snprintf(line, sizeof(line), "BAT:%lu V:%u L:%u",
-        (unsigned long) battery.millivolts,
-        battery.valid, battery.low_latched);
+    (void) snprintf(line, sizeof(line), "ENC:%d D:%d V:%u",
+        encoder.speed_mm_s, encoder.delta, encoder.valid);
     SSD1306_ShowString(6U, 0U, line);
     (void) SSD1306_Update();
 }

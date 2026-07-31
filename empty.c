@@ -56,7 +56,9 @@ int main(void)
     SYSCFG_DL_init();
     Moto_Init();
     Timebase_Init();
+#if APP_ENABLE_BATTERY_ADC
     Battery_Init();
+#endif
     Encoder_Init();
 #if APP_ENABLE_BLUETOOTH
     UartBT_Init();
@@ -73,7 +75,9 @@ int main(void)
     while (1) {
         now_ms = Timebase_Millis();
         EightIR_Service(now_ms);
+#if APP_ENABLE_BATTERY_ADC
         Battery_Service(now_ms);
+#endif
         Control_Service(now_ms);
 
         /* The independent watchdog is fed only at the main-loop tail. */
