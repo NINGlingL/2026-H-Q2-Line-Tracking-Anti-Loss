@@ -52,7 +52,7 @@
 /*
  * User-confirmed MG513XP28_12V with Hall encoder and 65 mm wheel:
  *   13 PPR * 28:1 gearbox * 4x quadrature = 1456 counts/wheel revolution.
- * The 6880a79 tuning block in empty.c uses a 0.12 m/s target.
+ * The current 16-second tuning block in empty.c uses a 0.39 m/s target.
  */
 #define APP_MOTOR_GEAR_RATIO           (28UL)
 #define APP_ENCODER_PPR                (13UL)

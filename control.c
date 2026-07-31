@@ -58,8 +58,8 @@ static int16_t configured_pwm_limit(void)
     if (g_control_tuning.pwm_limit_permille < 0) {
         return 0;
     }
-    if (g_control_tuning.pwm_limit_permille > 300) {
-        return 300;
+    if (g_control_tuning.pwm_limit_permille > 550) {
+        return 550;
     }
     return g_control_tuning.pwm_limit_permille;
 }

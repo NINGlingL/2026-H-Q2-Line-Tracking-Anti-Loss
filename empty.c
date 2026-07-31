@@ -44,15 +44,15 @@
 
 /* ======================== 用户调车参数区 ======================== */
 const Control_Tuning g_control_tuning = {
-    .pwm_limit_permille       = 300,   /* 6880a79最高输出：300=30%，moto.c也有30%硬限幅 */
-    .auto_base_pwm_permille   = 220,   /* 6880a79自动循迹固定基础速度：220=22% */
+    .pwm_limit_permille       = 550,   /* 本轮最高输出：550=55%，给高速转弯差速留余量 */
+    .auto_base_pwm_permille   = 410,   /* 固定基础速度：410=41%，预计单圈约16秒 */
     .diagnostic_pwm_permille  = 200,   /* 手动诊断模式电机输出：200=20% */
-    .speed_target_mm_s        = 120,   /* 编码器有效时目标速度：120mm/s；无效时固定使用基础PWM */
-    .line_kp                  = 8.0f,  /* 6880a79八路循迹PID比例P */
-    .line_ki                  = 0.3f,  /* 6880a79八路循迹PID积分I */
-    .line_kd                  = 0.12f, /* 6880a79八路循迹PID微分D */
+    .speed_target_mm_s        = 390,   /* 编码器有效时目标速度：390mm/s；无效时固定使用基础PWM */
+    .line_kp                  = 10.0f, /* 高速时增强八路循迹PID比例P */
+    .line_ki                  = 0.25f, /* 略减积分，避免高速时长期偏差累积过多 */
+    .line_kd                  = 0.10f, /* 略减微分，降低传感器跳变造成的高速摆动 */
     .line_integral_limit      = 20.0f, /* 循迹PID积分限幅 */
-    .line_output_limit        = 70.0f, /* 循迹PID输出限幅 */
+    .line_output_limit        = 100.0f,/* 高速循迹PID输出限幅，保证半圆弯道差速 */
     .line_separation_error    = 4.0f,  /* 循迹PID积分分离误差 */
     .speed_kp                 = 0.45f, /* 编码器速度PID比例P */
     .speed_ki                 = 0.40f, /* 编码器速度PID积分I */
@@ -64,10 +64,10 @@ const Control_Tuning g_control_tuning = {
     .yaw_ki                   = 0.02f, /* 陀螺仪角速度辅助积分I */
     .yaw_kd                   = 0.0f,  /* 陀螺仪角速度辅助微分D */
     .yaw_integral_limit       = 30.0f, /* 陀螺仪辅助PID积分限幅 */
-    .yaw_output_limit         = 30.0f, /* 陀螺仪辅助PID输出限幅 */
+    .yaw_output_limit         = 35.0f, /* 高速下略增陀螺仪辅助修正余量 */
     .yaw_separation_error     = 60.0f, /* 陀螺仪辅助PID积分分离误差 */
     .yaw_rate_per_position    = 5.0f,  /* 每单位循迹偏差对应的目标转向角速度 */
-    .marker_active_count      = 5U,    /* 停车线判定：至少5路同时检测黑线，兼容中间六路 */
+    .marker_active_count      = 6U,    /* 停车线判定：中间六路同时检测黑线后立即停车 */
     .marker_clear_ms          = 80U,   /* 离开起点启停线的确认时间：单位ms */
     .marker_min_lap_ms        = 5000U, /* 启动后至少运行多久才允许识别终点：单位ms */
     .line_lost_stop_ms        = 50U,   /* 连续丢线多久后停车：单位ms */
