@@ -1009,6 +1009,7 @@ static void oled_show_motor_lift(void)
     SSD1306_ShowString(3, 0, "LIFT :5.0mm");
     SSD1306_ShowString(4, 0, "STEP :4000");
     SSD1306_ShowString(5, 0, "SPEED:2000sps");
+    SSD1306_ShowString(6, 0, "DIR  :FORWARD");
     SSD1306_ShowString(7, 0, "THEN :AUTO SWEEP");
     SSD1306_Update();
 }
@@ -1051,7 +1052,8 @@ int main(void)
         DL_GPIO_initDigitalOutput(GPIO_STEP_C0_IOMUX);
         DL_GPIO_clearPins(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
         DL_GPIO_enableOutput(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
-        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+        /* 实测上升方向为 DIR 高电平；升高完成后再切回反向扫动。 */
+        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
         SSD1306_Init();
         oled_show_motor_lift();
         g_oled_refresh_count++;
@@ -1081,6 +1083,7 @@ int main(void)
                 motor_lift_steps++;
                 if (motor_lift_steps == MOTOR_SELF_TEST_LIFT_STEPS) {
                     motor_test_steps = 0U;
+                    DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
                     oled_show_motor_test(motor_test_direction, motor_test_legs);
                     g_oled_refresh_count++;
                     g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
