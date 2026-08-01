@@ -58,7 +58,7 @@
  * 图 2 中铰链在左、控制端在右：控制端抬高会使球向负坐标滚动。
  * 若实机“正步数”实际让控制端下降，把此值改为 +1。
  */
-#define MOTOR_POSITIVE_LIFTS_END      1
+#define MOTOR_POSITIVE_LIFTS_END      0
 #if MOTOR_POSITIVE_LIFTS_END
 #define CONTROL_TO_MOTOR_SIGN        (-1.0f)
 #else
