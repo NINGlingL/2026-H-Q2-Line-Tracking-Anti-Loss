@@ -9,8 +9,8 @@
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
  * 平衡位置设置:
- *   机构上电时必须位于丝杆最低点；最低点记为 0 mm。
- *   按下 PB21 后向上移动 77 mm，到达水管平衡位置并保持。
+ *   本次单功能测试从 77 mm 平衡位开始。
+ *   按下 PB21 后向下移动 10 mm，到达 67 mm 并保持。
  */
 
 #include "ti_msp_dl_config.h"
@@ -28,7 +28,7 @@
 #define OLED_PAGE_PERIOD_MS           2000U
 #define BUTTON_DEBOUNCE_MS             30U
 #define WAIT_BUTTON_TIMEOUT_MS         300000U
-#define BALANCE_MOVE_TIMEOUT_MS        15000U
+#define BALANCE_MOVE_TIMEOUT_MS         5000U
 
 #define BALL_CENTER_CM                0.0f
 #define BALL_STEP_CM                  5.0f
@@ -46,6 +46,8 @@
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
 #define BALANCE_HEIGHT_MM             77.0f
+#define TEST_DESCENT_MM               10.0f
+#define TEST_TARGET_HEIGHT_MM         (BALANCE_HEIGHT_MM - TEST_DESCENT_MM)
 #define ACTUATOR_MIN_MM                0.0f
 #define ACTUATOR_MAX_MM              100.0f
 #define ACTUATOR_TRAVEL_MM           (ACTUATOR_MAX_MM - ACTUATOR_MIN_MM)
@@ -377,8 +379,8 @@ static bool pid_update(float error_cm, float ball_velocity_cm_s, float dt_s, flo
 /* ==================== 第三问状态机 ==================== */
 typedef enum {
     PHASE_WAIT_BALANCE = 0,
-    PHASE_BALANCE_MOVE,
-    PHASE_BALANCE_READY,
+    PHASE_TEST_MOVE,
+    PHASE_TEST_DONE,
     PHASE_WAIT_VISION,
     PHASE_GO_PLUS,
     PHASE_GO_MINUS,
@@ -416,19 +418,21 @@ static void enter_safe(FaultCode fault)
     g_phase_start_ms = now_ms();
 }
 
-static void start_balance_move(uint32_t time_ms)
+static void start_down_move(uint32_t time_ms)
 {
-    int32_t balance_steps =
+    int32_t start_steps =
         (int32_t)(BALANCE_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
+    int32_t target_steps =
+        (int32_t)(TEST_TARGET_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
 
     /*
-     * 当前位置由用户确认在丝杆最低点，记为绝对 0 mm。PB21 只在初始
-     * 等待状态响应一次，目标 61600 微步对应向上 77 mm。
+     * 当前位置由用户确认在 77 mm 平衡位。PB21 只在初始等待状态响应
+     * 一次，目标从 61600 微步降到 53600 微步，即向下移动 10 mm。
      */
-    tmc2208_set_current_position(0);
+    tmc2208_set_current_position(start_steps);
     tmc2208_enable();
-    tmc2208_move_to(balance_steps);
-    g_phase = PHASE_BALANCE_MOVE;
+    tmc2208_move_to(target_steps);
+    g_phase = PHASE_TEST_MOVE;
     g_phase_start_ms = time_ms;
 }
 
@@ -444,7 +448,7 @@ static void service_balance_button(uint32_t time_ms)
         (raw != g_button_stable)) {
         g_button_stable = raw;
         if ((raw == 0U) && (g_phase == PHASE_WAIT_BALANCE)) {
-            start_balance_move(time_ms);
+            start_down_move(time_ms);
         }
     }
 }
@@ -474,19 +478,19 @@ static bool trajectory_update(uint32_t time_ms)
             }
             break;
 
-        case PHASE_BALANCE_MOVE:
+        case PHASE_TEST_MOVE:
             if (!tmc2208_is_moving() &&
                 (tmc2208_get_position() ==
-                 (int32_t)(BALANCE_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f))) {
+                 (int32_t)(TEST_TARGET_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f))) {
                 /* 单功能验证阶段：到位后保持使能，不自动进入视觉 PID。 */
-                g_phase = PHASE_BALANCE_READY;
+                g_phase = PHASE_TEST_DONE;
                 g_phase_start_ms = time_ms;
             } else if ((time_ms - g_phase_start_ms) > BALANCE_MOVE_TIMEOUT_MS) {
                 enter_safe(FAULT_BALANCE_MOVE_TIMEOUT);
             }
             break;
 
-        case PHASE_BALANCE_READY:
+        case PHASE_TEST_DONE:
             break;
 
         case PHASE_WAIT_VISION:
@@ -598,7 +602,7 @@ static void control_supervise(void)
     }
 
     if ((g_phase == PHASE_WAIT_BALANCE) ||
-        (g_phase == PHASE_BALANCE_MOVE) ||
+        (g_phase == PHASE_TEST_MOVE) ||
         (g_phase == PHASE_WAIT_VISION)) {
         (void)trajectory_update(time_ms);
     } else if ((g_phase == PHASE_GO_PLUS) &&
@@ -700,8 +704,8 @@ static const char *phase_text(void)
 {
     switch (g_phase) {
         case PHASE_WAIT_BALANCE: return "SET";
-        case PHASE_BALANCE_MOVE:return "CAL";
-        case PHASE_BALANCE_READY:return "READY";
+        case PHASE_TEST_MOVE:   return "DOWN";
+        case PHASE_TEST_DONE:   return "DONE";
         case PHASE_WAIT_VISION: return "WAIT";
         case PHASE_GO_PLUS:     return "GO+5";
         case PHASE_GO_MINUS:    return "GO-5";
@@ -752,9 +756,9 @@ static void oled_show_balance_setup(uint32_t time_ms)
     SSD1306_ShowString(0, 90, "ms");
 
     if (g_phase == PHASE_WAIT_BALANCE) {
-        SSD1306_ShowString(1, 0, "BAL SET 77.0MM");
+        SSD1306_ShowString(1, 0, "DOWN TEST 10.0MM");
         SSD1306_ShowString(2, 0, "KEY:PB21 M:OFF");
-        SSD1306_ShowString(3, 0, "PRESS PB21 TO MOVE");
+        SSD1306_ShowString(3, 0, "PRESS PB21 TO DOWN");
         SSD1306_ShowString(4, 0, "Rx:");
         SSD1306_ShowNum(4, 18, (int32_t)g_accepted_frames, 5);
         SSD1306_ShowString(4, 54, "Rj:");
@@ -765,17 +769,17 @@ static void oled_show_balance_setup(uint32_t time_ms)
         SSD1306_ShowString(5, 54, "V:");
         fmt_snum(g_ball_vel_cm_s, 1, 3, text);
         SSD1306_ShowString(5, 66, text);
-        SSD1306_ShowString(6, 0, "START:LOWEST 0MM");
+        SSD1306_ShowString(6, 0, "START:77 TARGET:67");
         SSD1306_ShowString(7, 0, "VISION PID:DISABLED");
-    } else if (g_phase == PHASE_BALANCE_MOVE) {
-        SSD1306_ShowString(1, 0, "RISING TO 77.0MM");
+    } else if (g_phase == PHASE_TEST_MOVE) {
+        SSD1306_ShowString(1, 0, "LOWERING TO 67.0MM");
         SSD1306_ShowString(2, 0, "MOTOR:");
         SSD1306_ShowString(2, 36, motor_status_text());
         SSD1306_ShowString(3, 0, "POS:");
         fmt_unum(from_motor_mm, 1, 2, text);
         SSD1306_ShowString(3, 24, text);
         SSD1306_ShowString(3, 54, "mm");
-        SSD1306_ShowString(4, 0, "TARGET:77.0mm");
+        SSD1306_ShowString(4, 0, "TARGET:67.0mm");
         SSD1306_ShowString(5, 0, "Rx:");
         SSD1306_ShowNum(5, 18, (int32_t)g_accepted_frames, 5);
         SSD1306_ShowString(5, 54, "Rj:");
@@ -783,10 +787,10 @@ static void oled_show_balance_setup(uint32_t time_ms)
         SSD1306_ShowString(6, 0, "WAIT UNTIL READY");
         SSD1306_ShowString(7, 0, "DO NOT MOVE PIPE");
     } else {
-        SSD1306_ShowString(1, 0, "BALANCE READY");
+        SSD1306_ShowString(1, 0, "DOWN TEST COMPLETE");
         SSD1306_ShowString(2, 0, "MOTOR:IDLE HOLD:ON");
-        SSD1306_ShowString(3, 0, "POS:77.0mm");
-        SSD1306_ShowString(4, 0, "RISE DONE:77.0mm");
+        SSD1306_ShowString(3, 0, "POS:67.0mm");
+        SSD1306_ShowString(4, 0, "MOVED DOWN:10.0mm");
         SSD1306_ShowString(5, 0, "PB21:LOCKED");
         SSD1306_ShowString(6, 0, "VISION PID:DISABLED");
         SSD1306_ShowString(7, 0, "TEST STEP COMPLETE");
@@ -915,8 +919,8 @@ static void oled_update(uint32_t time_ms)
     uint32_t page = (time_ms / OLED_PAGE_PERIOD_MS) & 1U;
 
     if ((g_phase == PHASE_WAIT_BALANCE) ||
-        (g_phase == PHASE_BALANCE_MOVE) ||
-        (g_phase == PHASE_BALANCE_READY)) {
+        (g_phase == PHASE_TEST_MOVE) ||
+        (g_phase == PHASE_TEST_DONE)) {
         SSD1306_Clear();
         oled_show_balance_setup(time_ms);
         SSD1306_Update();
@@ -951,14 +955,15 @@ int main(void)
     g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 从最低点上升 77 mm
-     * -> 保持在平衡位。本阶段不进入视觉 PID。
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 把当前位置记为 77 mm
+     * -> 等待 PB21 -> 向下降到 67 mm 并保持。本阶段不进入视觉 PID。
      */
     tmc2208_init();
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
     tmc2208_set_accel(STEPPER_ACCEL_SPS2);
     tmc2208_set_limits_mm(ACTUATOR_MIN_MM, ACTUATOR_MAX_MM);
-    tmc2208_set_current_position(0);
+    tmc2208_set_current_position(
+        (int32_t)(BALANCE_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f));
 
     delay_ms(50U);
     SSD1306_Init();
