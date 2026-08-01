@@ -422,8 +422,8 @@ def model_path_for_device(device_name):
 
 AXIS_START_PX = (40, 112)
 AXIS_END_PX = (280, 112)
-AXIS_START_CM = 0
-AXIS_END_CM = 25
+AXIS_START_CM = -12.5  # 左侧为负12.5cm
+AXIS_END_CM = 12.5     # 右侧为正12.5cm（中心为0）
 
 
 # =============================================================================
@@ -574,6 +574,7 @@ predicted_x = None
 predicted_y = None
 last_uart_send_ms = 0  # 上次串口发送时间
 uart_send_count = 0    # 串口发送计数
+velocity_cm_s_signed = 0.0  # 带方向的速度（全局变量）
 
 print("[INFO] 主循环开始")
 
@@ -635,18 +636,33 @@ while not app.need_exit():
         VELOCITY_SCALE = 0.3  # 提升到30%
         velocity_cm_s = velocity_px_s * px_to_cm_ratio * VELOCITY_SCALE
 
+        # 计算速度方向（正负）
+        # 标定轴从左到右: AXIS_START_PX -> AXIS_END_PX
+        # vx > 0 表示向右移动（正方向）, vx < 0 表示向左移动（负方向）
+        axis_direction_x = AXIS_END_PX[0] - AXIS_START_PX[0]
+        axis_direction_y = AXIS_END_PX[1] - AXIS_START_PX[1]
+        axis_length_sq = axis_direction_x * axis_direction_x + axis_direction_y * axis_direction_y
+
+        if axis_length_sq > 0:
+            # 将速度投影到标定轴上，得到带方向的速度
+            velocity_on_axis = (position_filter.vx * axis_direction_x +
+                               position_filter.vy * axis_direction_y) / math.sqrt(axis_length_sq)
+            velocity_cm_s_signed = velocity_on_axis * px_to_cm_ratio * VELOCITY_SCALE
+        else:
+            velocity_cm_s_signed = 0.0
+
         # 速度平滑: 过滤掉小幅度抖动，显示更稳定
-        if velocity_cm_s < 0.5:
-            velocity_cm_s = 0.0  # 小于0.5cm/s视为静止
+        if abs(velocity_cm_s_signed) < 0.5:
+            velocity_cm_s_signed = 0.0  # 小于0.5cm/s视为静止
 
         # --- 串口数据发送 (向天猛星MSPM0发送球位置和速度) ---
         # 频率控制: 避免OLED刷新过快，同时不影响检测FPS
         if uart_device is not None and (now_ms - last_uart_send_ms >= UART_SEND_INTERVAL_MS):
             try:
-                # ASCII格式: 位置cm + 速度cm/s + 换行符
-                # 格式: "P:12.34,V:56.78\n"
-                # P = Position (位置cm), V = Velocity (速度cm/s)
-                uart_device.write_str(f"P:{position_cm:.2f},V:{velocity_cm_s:.2f}\n")
+                # ASCII格式: 位置cm + 速度cm/s (带正负号) + 换行符
+                # 格式: "P:12.34,V:+5.67\n" 或 "P:-8.50,V:-12.30\n"
+                # P = Position (位置cm), V = Velocity (速度cm/s，正=向右，负=向左)
+                uart_device.write_str(f"P:{position_cm:.2f},V:{velocity_cm_s_signed:+.2f}\n")
                 last_uart_send_ms = now_ms
                 uart_send_count += 1
             except Exception:
@@ -657,6 +673,7 @@ while not app.need_exit():
         position_filter.mark_missing(now_ms)
         pred_x, pred_y = position_filter.predict(now_ms)
         predicted_x, predicted_y = pred_x, pred_y
+        velocity_cm_s_signed = 0.0  # 丢球时速度为0
 
         # 自适应曝光: 通知丢球, 可能触发曝光调整
         exposure_adapter.on_ball_lost()
@@ -690,8 +707,9 @@ while not app.need_exit():
             img.draw_string(ball.x, ball.y, msg, color=image.COLOR_RED)
             img.draw_rect(0, 0, input_w, 35, PANEL_COLOR, -1)
 
-        # 位置和速度信息 (始终显示)
-        img.draw_string(8, 5, f"BALL {position_cm:+.2f}cm {velocity_cm_s:.1f}cm/s",
+        # 位置和速度信息 (始终显示，速度带正负号)
+        # 正速度=向右移动，负速度=向左移动
+        img.draw_string(8, 5, f"BALL {position_cm:+.2f}cm {velocity_cm_s_signed:+.1f}cm/s",
                         color=image.COLOR_WHITE, scale=1.2, thickness=2)
     else:
         # 丢球显示
