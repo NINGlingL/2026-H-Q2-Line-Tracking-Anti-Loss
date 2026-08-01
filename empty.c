@@ -69,8 +69,8 @@ const Control_Tuning g_control_tuning = {
     .yaw_rate_per_position    = 5.0f,  /* 每单位循迹偏差对应的目标转向角速度 */
     .marker_active_count      = 6U,    /* 停车线判定：中间六路同时检测黑线后立即停车 */
     .marker_clear_ms          = 80U,   /* 离开起点启停线的确认时间：单位ms */
-    .marker_min_lap_ms        = 5000U, /* 启动后至少运行多久才允许识别终点：单位ms */
-    .line_lost_stop_ms        = 50U,   /* 连续丢线多久后停车：单位ms */
+    .marker_min_lap_ms        = 1000U, /* 起点状态离开后至少1秒才允许再次匹配，避免依赖赛道长度 */
+    .line_lost_stop_ms        = 180U,  /* 丢线后低速沿用上次转向，超过180ms才停车 */
     .auto_timeout_ms          = 35000U,/* 自动循迹最长运行时间：超时立即停车 */
     .diagnostic_timeout_ms    = 30000U /* 手动诊断模式最长运行时间：单位ms */
 };

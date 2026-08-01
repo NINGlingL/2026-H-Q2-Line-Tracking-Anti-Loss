@@ -23,6 +23,8 @@
 #define LAP_YAW_NOMINAL_DEG   (360.0f)
 #define LAP_YAW_FALLBACK_DEG  (370.0f)
 #define FINISH_BASE_PERCENT   (65.0f)
+#define START_PATTERN_YAW_GATE_DEG (350.0f)
+#define LOST_LINE_HOLD_PERCENT (55)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -32,6 +34,8 @@ static IMU_Data g_imu;
 static int16_t g_diag_power;
 static int16_t g_manual_left;
 static int16_t g_manual_right;
+static int16_t g_last_track_left;
+static int16_t g_last_track_right;
 static uint32_t g_last_control_ms;
 static uint32_t g_last_oled_ms;
 static uint32_t g_last_oled_recovery_ms;
@@ -47,6 +51,9 @@ static uint8_t g_start_marker_armed;
 static uint8_t g_finish_braking;
 static uint8_t g_lap_yaw_tracking;
 static uint8_t g_finish_yaw_armed;
+static uint8_t g_start_ir_raw;
+static uint8_t g_start_ir_active_count;
+static uint8_t g_start_ir_valid;
 static uint8_t g_button_last_raw;
 static uint8_t g_button_stable;
 static uint32_t g_button_change_ms;
@@ -103,14 +110,51 @@ static uint8_t configured_marker_count(void)
     return g_control_tuning.marker_active_count;
 }
 
+static uint8_t bit_count8(uint8_t value)
+{
+    uint8_t count = 0U;
+
+    while (value != 0U) {
+        count = (uint8_t) (count + (value & 1U));
+        value >>= 1U;
+    }
+    return count;
+}
+
 static uint8_t start_marker_detected(const EightIR_State *ir)
 {
-    /*
-     * The A marker makes the six middle detectors see black.  Count all
-     * active detectors here so UART channel order or IR reversal cannot
-     * hide the marker; a normal 1.8 cm guide line activates far fewer.
-     */
-    return (ir->active_count >= configured_marker_count()) ? 1U : 0U;
+    uint8_t different_bits;
+    uint8_t active_difference;
+    uint8_t tolerance;
+
+    if (g_start_ir_valid == 0U) {
+        return (ir->active_count >= configured_marker_count()) ? 1U : 0U;
+    }
+    if (g_start_ir_active_count >= 3U && ir->active_count < 3U) {
+        return 0U;
+    }
+
+    different_bits = bit_count8((uint8_t) (ir->raw ^ g_start_ir_raw));
+    active_difference = (ir->active_count >= g_start_ir_active_count) ?
+        (uint8_t) (ir->active_count - g_start_ir_active_count) :
+        (uint8_t) (g_start_ir_active_count - ir->active_count);
+    tolerance = (g_start_ir_active_count >= 5U) ? 2U :
+        (g_start_ir_active_count >= 3U) ? 1U : 0U;
+
+    return (different_bits <= tolerance &&
+            active_difference <= tolerance) ? 1U : 0U;
+}
+
+static uint8_t start_pattern_finish_allowed(void)
+{
+    /* A pattern containing at least three black sensors is marker-like. */
+    if (g_start_ir_active_count >= 3U) {
+        return 1U;
+    }
+    /* Ordinary one/two-sensor line patterns repeat, so require a full turn. */
+    return (g_finish_yaw_armed != 0U &&
+            fabsf(g_lap_yaw_accum_deg) >=
+                START_PATTERN_YAW_GATE_DEG) ? 1U : 0U;
 }
 
 static uint8_t lap_yaw_is_usable(void)
@@ -170,6 +214,8 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     g_control.mode_enter_ms = now_ms;
     g_manual_left = 0;
     g_manual_right = 0;
+    g_last_track_left = 0;
+    g_last_track_right = 0;
     if (reason != NULL) {
         (void) snprintf(
             g_last_command, sizeof(g_last_command), "%s", reason);
@@ -228,6 +274,11 @@ static void enter_auto(uint32_t now_ms)
     g_start_marker_armed = 0U;
     g_finish_braking = 0U;
     g_finish_brake_start_ms = 0U;
+    g_last_track_left = 0;
+    g_last_track_right = 0;
+    g_start_ir_raw = ir.raw;
+    g_start_ir_active_count = ir.active_count;
+    g_start_ir_valid = 1U;
     g_lap_yaw_accum_deg = 0.0f;
     g_finish_yaw_armed = 0U;
     if (lap_yaw_is_usable() != 0U) {
@@ -237,7 +288,8 @@ static void enter_auto(uint32_t now_ms)
         g_lap_yaw_last_deg = 0.0f;
         g_lap_yaw_tracking = 0U;
     }
-    (void) snprintf(g_last_command, sizeof(g_last_command), "AUTO START");
+    (void) snprintf(g_last_command, sizeof(g_last_command),
+        "AUTO S:%02X N:%u", g_start_ir_raw, g_start_ir_active_count);
 }
 
 static void begin_finish_brake(const char *label, uint32_t now_ms)
@@ -452,12 +504,26 @@ static void run_auto(uint32_t now_ms)
     }
 
     if (ir.active_count == 0U) {
+        uint32_t lost_elapsed_ms;
+
         if (g_line_lost_ms == 0U) {
             g_line_lost_ms = now_ms;
         }
-        Moto_EmergencyStop();
-        if ((uint32_t) (now_ms - g_line_lost_ms) >=
-            g_control_tuning.line_lost_stop_ms) {
+        lost_elapsed_ms = (uint32_t) (now_ms - g_line_lost_ms);
+
+        /* Brief gaps keep the last steering direction at reduced power. */
+        if (g_last_track_left > 0 || g_last_track_right > 0) {
+            left = (int16_t) ((int32_t) g_last_track_left *
+                LOST_LINE_HOLD_PERCENT / 100);
+            right = (int16_t) ((int32_t) g_last_track_right *
+                LOST_LINE_HOLD_PERCENT / 100);
+            g_control.left_command = left;
+            g_control.right_command = right;
+            Moto_SetLR(left, right);
+        } else {
+            Moto_EmergencyStop();
+        }
+        if (lost_elapsed_ms >= g_control_tuning.line_lost_stop_ms) {
             enter_safe("LINE LOST", now_ms);
         }
         return;
@@ -480,8 +546,9 @@ static void run_auto(uint32_t now_ms)
             g_marker_clear_ms = 0U;
         }
     } else if (g_auto_elapsed_ms >= g_control_tuning.marker_min_lap_ms &&
+               start_pattern_finish_allowed() != 0U &&
                start_marker_detected(&ir) != 0U) {
-        /* Brake at the first valid marker frame instead of coasting past A. */
+        /* Stop when the saved pre-start sensor pattern returns. */
         begin_finish_brake("LINE BRAKE", now_ms);
         return;
     }
@@ -593,6 +660,8 @@ static void run_auto(uint32_t now_ms)
 
     g_control.left_command = left;
     g_control.right_command = right;
+    g_last_track_left = left;
+    g_last_track_right = right;
     Moto_SetLR(left, right);
 }
 
@@ -710,6 +779,11 @@ void Control_Init(uint32_t now_ms)
     g_lap_yaw_last_deg = 0.0f;
     g_lap_yaw_tracking = 0U;
     g_finish_yaw_armed = 0U;
+    g_last_track_left = 0;
+    g_last_track_right = 0;
+    g_start_ir_raw = 0xFFU;
+    g_start_ir_active_count = 0U;
+    g_start_ir_valid = 0U;
     g_last_oled_recovery_ms = now_ms;
     g_last_imu_ms = now_ms;
     g_imu_period_ms = IMU_PERIOD_MS;
