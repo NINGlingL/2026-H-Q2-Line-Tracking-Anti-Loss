@@ -24,6 +24,8 @@
 #define VISION_PERIOD_MS              50U
 #define VISION_TIMEOUT_MS             250U
 #define WAIT_VISION_TIMEOUT_MS        10000U
+#define OLED_REFRESH_MS               200U
+#define OLED_PAGE_PERIOD_MS           2000U
 
 #define BALL_CENTER_CM                0.0f
 #define BALL_STEP_CM                  5.0f
@@ -150,6 +152,7 @@ static bool g_ball_valid = false;
 static bool g_ball_new = false;
 static uint32_t g_last_data_ms = 0U;
 static uint32_t g_last_sample_ms = 0U;
+static uint32_t g_accepted_frames = 0U;
 static uint16_t g_rejected_frames = 0U;
 
 static bool parse_float_token(const char *text, float *value, const char **end)
@@ -253,6 +256,9 @@ static void accept_vision_line(const char *line)
         g_last_data_ms = sample_ms;
         g_ball_valid = true;
         g_ball_new = true;
+        if (g_accepted_frames < 99999U) {
+            g_accepted_frames++;
+        }
     } else {
         if (g_rejected_frames < 65535U) {
             g_rejected_frames++;
@@ -604,6 +610,17 @@ static void fmt_steps(int32_t value, char *buffer)
     buffer[6] = '\0';
 }
 
+static void fmt_unum(float value, int decimals, int max_integer_digits, char *buffer)
+{
+    char signed_text[16];
+
+    if (value < 0.0f) {
+        value = -value;
+    }
+    fmt_snum(value, decimals, max_integer_digits, signed_text);
+    strcpy(buffer, &signed_text[1]);
+}
+
 static const char *phase_text(void)
 {
     switch (g_phase) {
@@ -616,66 +633,157 @@ static const char *phase_text(void)
     }
 }
 
-static void oled_update(void)
+static const char *uart_status_text(uint32_t time_ms)
+{
+    if (!g_ball_valid) {
+        return (g_rejected_frames == 0U) ? "WAIT" : "BAD";
+    }
+    if ((time_ms - g_last_data_ms) > VISION_TIMEOUT_MS) {
+        return "OLD";
+    }
+    return "OK";
+}
+
+static const char *motor_status_text(void)
+{
+    if (!tmc2208_is_enabled()) {
+        return "OFF";
+    }
+    return tmc2208_is_moving() ? "MOVE" : "IDLE";
+}
+
+static void oled_show_status(uint32_t time_ms)
+{
+    char text[16];
+    uint32_t age_ms = time_ms - g_last_data_ms;
+
+    SSD1306_ShowString(0, 8, "TASK3 STATUS 1/2");
+
+    SSD1306_ShowString(1, 0, "U:");
+    SSD1306_ShowString(1, 12, uart_status_text(time_ms));
+    SSD1306_ShowString(1, 42, "A:");
+    if (g_ball_valid) {
+        if (age_ms > 999U) {
+            age_ms = 999U;
+        }
+        SSD1306_ShowNum(1, 54, (int32_t)age_ms, 3);
+    } else {
+        SSD1306_ShowString(1, 54, "---");
+    }
+    SSD1306_ShowString(1, 72, "ms");
+
+    SSD1306_ShowString(2, 0, "M:");
+    SSD1306_ShowString(2, 12, motor_status_text());
+    SSD1306_ShowString(2, 42, "Ph:");
+    SSD1306_ShowString(2, 60, phase_text());
+
+    SSD1306_ShowString(3, 0, "B:");
+    fmt_snum(g_ball_cm, 2, 2, text);
+    SSD1306_ShowString(3, 12, text);
+    SSD1306_ShowString(3, 60, "T:");
+    fmt_snum(g_target_cm, 2, 2, text);
+    SSD1306_ShowString(3, 72, text);
+
+    SSD1306_ShowString(4, 0, "V:");
+    fmt_snum(g_ball_vel_cm_s, 1, 3, text);
+    SSD1306_ShowString(4, 12, text);
+    SSD1306_ShowString(4, 54, "E:");
+    fmt_snum(g_error_cm, 2, 2, text);
+    SSD1306_ShowString(4, 66, text);
+
+    SSD1306_ShowString(5, 0, "O:");
+    fmt_snum(g_control_mm, 2, 1, text);
+    SSD1306_ShowString(5, 12, text);
+    SSD1306_ShowString(5, 48, "St:");
+    fmt_steps(tmc2208_get_position(), text);
+    SSD1306_ShowString(5, 66, text);
+
+    SSD1306_ShowString(6, 0, "Rx:");
+    SSD1306_ShowNum(6, 18, (int32_t)g_accepted_frames, 5);
+    SSD1306_ShowString(6, 54, "Rj:");
+    SSD1306_ShowNum(6, 72, (int32_t)g_rejected_frames, 3);
+
+    if (g_phase == PHASE_SAFE) {
+        SSD1306_ShowString(7, 0, "FAULT:");
+        SSD1306_ShowNum(7, 36, (int32_t)g_fault, 2);
+        SSD1306_ShowString(7, 60, "MOTOR OFF");
+    } else {
+        SSD1306_ShowString(7, 0, "T:");
+        if (g_phase == PHASE_HOLD_MINUS) {
+            fmt_unum((float)g_task_finish_ms * 0.001f, 2, 1, text);
+        } else if (g_phase == PHASE_WAIT_VISION) {
+            fmt_unum(0.0f, 2, 1, text);
+        } else {
+            fmt_unum((float)(time_ms - g_task_start_ms) * 0.001f, 2, 1, text);
+        }
+        SSD1306_ShowString(7, 12, text);
+        SSD1306_ShowString(7, 48, " Sp:");
+        fmt_unum(tmc2208_get_current_speed(), 0, 4, text);
+        SSD1306_ShowString(7, 72, text);
+    }
+}
+
+static void oled_show_parameters(void)
 {
     char text[16];
 
-    SSD1306_Clear();
-    SSD1306_ShowString(0, 14, "TASK3 BALL PID");
+    SSD1306_ShowString(0, 2, "PID/MOTOR PARAM 2/2");
 
+    SSD1306_ShowString(1, 0, "Kp:");
+    fmt_unum(g_pid.kp, 2, 1, text);
+    SSD1306_ShowString(1, 18, text);
+    SSD1306_ShowString(1, 60, "Ki:");
+    fmt_unum(g_pid.ki, 3, 1, text);
+    SSD1306_ShowString(1, 78, text);
+
+    SSD1306_ShowString(2, 0, "Kd:");
+    fmt_unum(g_pid.kd, 2, 1, text);
+    SSD1306_ShowString(2, 18, text);
+    SSD1306_ShowString(2, 60, "Tol:");
+    fmt_unum(ARRIVAL_TOL_CM, 2, 1, text);
+    SSD1306_ShowString(2, 84, text);
+
+    SSD1306_ShowString(3, 0, "Out:");
+    fmt_unum(PID_OUTPUT_LIMIT_MM, 2, 1, text);
+    SSD1306_ShowString(3, 24, text);
+    SSD1306_ShowString(3, 54, "mm Slw:");
+    fmt_unum(PID_OUTPUT_SLEW_MM_S, 1, 2, text);
+    SSD1306_ShowString(3, 96, text);
+
+    SSD1306_ShowString(4, 0, "Spd:");
+    SSD1306_ShowNum(4, 24, (int32_t)STEPPER_MAX_SPEED_SPS, 4);
+    SSD1306_ShowString(4, 54, "Acc:");
+    SSD1306_ShowNum(4, 78, (int32_t)STEPPER_ACCEL_SPS2, 5);
+
+    SSD1306_ShowString(5, 0, "Lost:");
+    SSD1306_ShowNum(5, 30, (int32_t)VISION_TIMEOUT_MS, 3);
+    SSD1306_ShowString(5, 54, " Dwl:");
+    SSD1306_ShowNum(5, 84, (int32_t)ARRIVAL_DWELL_MS, 3);
+    SSD1306_ShowString(5, 102, "ms");
+
+    SSD1306_ShowString(6, 0, "Nut:");
+    fmt_unum(NEUTRAL_FROM_MOTOR_MM, 1, 2, text);
+    SSD1306_ShowString(6, 24, text);
+    SSD1306_ShowString(6, 54, "mm 800st/mm");
+
+    SSD1306_ShowString(7, 0, "UART:115200 PB0/1");
+}
+
+static void oled_update(uint32_t time_ms)
+{
+    uint32_t page = (time_ms / OLED_PAGE_PERIOD_MS) & 1U;
+
+    /* 故障页必须持续可见，避免参数轮播遮住故障码和电机关闭状态。 */
     if (g_phase == PHASE_SAFE) {
-        SSD1306_ShowString(2, 0, "SAFE MOTOR OFF");
-        SSD1306_ShowString(3, 0, "Fault:");
-        SSD1306_ShowNum(3, 42, (int32_t)g_fault, 2);
-        SSD1306_ShowString(5, 0, "Reset after check");
-        SSD1306_Update();
-        return;
+        page = 0U;
     }
 
-    if (g_phase == PHASE_WAIT_VISION) {
-        SSD1306_ShowString(2, 0, "Set nut:65.0mm");
-        SSD1306_ShowString(3, 0, "Motor disabled");
-        SSD1306_ShowString(5, 0, "Waiting vision");
-        SSD1306_Update();
-        return;
-    }
-
-    SSD1306_ShowString(1, 0, "Ball:");
-    fmt_snum(g_ball_cm, 2, 2, text);
-    SSD1306_ShowString(1, 30, text);
-    SSD1306_ShowString(1, 78, "cm");
-
-    SSD1306_ShowString(2, 0, "Tgt:");
-    fmt_snum(g_target_cm, 2, 2, text);
-    SSD1306_ShowString(2, 30, text);
-    SSD1306_ShowString(2, 78, "cm");
-
-    SSD1306_ShowString(3, 0, "Vel:");
-    fmt_snum(g_ball_vel_cm_s, 1, 3, text);
-    SSD1306_ShowString(3, 30, text);
-    SSD1306_ShowString(3, 78, "cm/s");
-
-    SSD1306_ShowString(4, 0, "Out:");
-    fmt_snum(g_control_mm, 2, 1, text);
-    SSD1306_ShowString(4, 30, text);
-    SSD1306_ShowString(4, 72, "mm");
-
-    SSD1306_ShowString(5, 0, "Step:");
-    fmt_steps(tmc2208_get_position(), text);
-    SSD1306_ShowString(5, 30, text);
-
-    SSD1306_ShowString(6, 0, "State:");
-    SSD1306_ShowString(6, 36, phase_text());
-
-    SSD1306_ShowString(7, 0, "T:");
-    if (g_phase == PHASE_HOLD_MINUS) {
-        fmt_snum((float)g_task_finish_ms * 0.001f, 2, 1, text);
+    SSD1306_Clear();
+    if (page == 0U) {
+        oled_show_status(time_ms);
     } else {
-        fmt_snum((float)(now_ms() - g_task_start_ms) * 0.001f, 2, 1, text);
+        oled_show_parameters();
     }
-    SSD1306_ShowString(7, 12, text);
-    SSD1306_ShowString(7, 54, "s Rj:");
-    SSD1306_ShowNum(7, 84, (int32_t)g_rejected_frames, 3);
     SSD1306_Update();
 }
 
@@ -721,9 +829,9 @@ int main(void)
         control_supervise();
 
         time_ms = now_ms();
-        if ((time_ms - last_ui_ms) >= 100U) {
+        if ((time_ms - last_ui_ms) >= OLED_REFRESH_MS) {
             last_ui_ms = time_ms;
-            oled_update();
+            oled_update(time_ms);
         }
 
         /* 独立 LFCLK 看门狗只允许在主循环末尾喂；任何 ISR 都不喂狗。 */
