@@ -2,11 +2,11 @@
  * 车载平衡滚球运动控制系统 - 第三问
  *
  * MaixCAM Pro -> UART0:
- *   P:<position_0_to_25_cm>,V:<speed_magnitude_cm_s>\n, 115200 8N1, 20 Hz
+ *   P:<signed_position_cm>,V:<signed_velocity_cm_s>\n, 115200 8N1, 20 Hz
  *   按本工程 SysConfig 接线：Maix TX -> MSPM0 PB1(RX)，Maix RX -> PB0(TX)。
- *   视觉程序把水管左端映射为 0 cm、右端映射为 25 cm；MCU 内部减去
- *   12.5 cm 得到以中心 O 为零点的有符号位置。视觉 V 是速度大小、没有方向，
- *   MCU 使用连续位置差分得到有符号速度供 PID 微分项使用。
+ *   最新视觉程序已把 12.5 cm 刻度定义为中心 O：有效位置为 -12.5~+10.5 cm；
+ *   V 也已投影到标定轴并带正负号。MCU 直接使用 P，并用连续 P 差分速度与
+ *   视觉 V 做一致性融合，避免单帧速度噪声直接进入 PID。
  *
  * 第三问轨迹:
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
@@ -34,15 +34,14 @@
 
 #define BALL_CENTER_CM                0.0f
 #define BALL_STEP_CM                  5.0f
-#define VISION_AXIS_MIN_CM             0.0f
-#define VISION_AXIS_MAX_CM            25.0f
-#define VISION_CENTER_OFFSET_CM       12.5f
-#define BALL_POSITION_MIN_CM         (VISION_AXIS_MIN_CM - VISION_CENTER_OFFSET_CM)
-#define BALL_POSITION_MAX_CM         (VISION_AXIS_MAX_CM - VISION_CENTER_OFFSET_CM)
+#define BALL_POSITION_MIN_CM         -12.5f
+#define BALL_POSITION_MAX_CM          10.5f
 #define BALL_SPEED_LIMIT_CM_S         150.0f
 #define BALL_JUMP_BASE_CM             2.0f
 #define BALL_JUMP_SPEED_FACTOR        1.8f
 #define VELOCITY_FILTER_ALPHA          0.35f
+#define VISION_VELOCITY_SCALE          0.30f
+#define VISION_VELOCITY_BLEND          0.25f
 
 #define ARRIVAL_TOL_CM                0.60f
 #define ARRIVAL_SPEED_CM_S            0.50f
@@ -134,6 +133,8 @@ static bool finitef_local(float value)
 static char rx_buffer[RX_BUFFER_SIZE];
 static volatile uint16_t rx_head = 0U;
 static volatile uint16_t rx_tail = 0U;
+static volatile uint32_t g_uart_rx_bytes = 0U;
+static volatile uint16_t g_uart_overruns = 0U;
 
 void UART0_IRQHandler(void)
 {
@@ -141,9 +142,14 @@ void UART0_IRQHandler(void)
         while (DL_UART_isRXFIFOEmpty(UART_0_INST) == false) {
             char ch = (char)DL_UART_receiveData(UART_0_INST);
             uint16_t next = (uint16_t)((rx_head + 1U) % RX_BUFFER_SIZE);
+            if (g_uart_rx_bytes < 99999U) {
+                g_uart_rx_bytes++;
+            }
             if (next != rx_tail) {
                 rx_buffer[rx_head] = ch;
                 rx_head = next;
+            } else if (g_uart_overruns < 999U) {
+                g_uart_overruns++;
             }
         }
     }
@@ -155,16 +161,16 @@ static char line_buf[LINE_BUF_SIZE];
 static uint8_t line_len = 0U;
 static bool line_overflow = false;
 
-static float g_ball_raw_cm = VISION_CENTER_OFFSET_CM;
 static float g_ball_cm = BALL_CENTER_CM;
-static float g_ball_vel_cm_s = 0.0f;          /* MCU 差分得到的有符号轴向速度 */
-static float g_vision_speed_cm_s = 0.0f;      /* 视觉 V：仅为非负速度大小 */
+static float g_ball_vel_cm_s = 0.0f;          /* 融合后的有符号轴向速度 */
+static float g_vision_vel_cm_s = 0.0f;        /* 视觉发送的有符号缩放速度 */
 static bool g_ball_valid = false;
 static bool g_ball_new = false;
 static uint32_t g_last_data_ms = 0U;
 static uint32_t g_last_sample_ms = 0U;
 static uint32_t g_accepted_frames = 0U;
 static uint16_t g_rejected_frames = 0U;
+static uint32_t g_uart_lines = 0U;
 
 /* PB21 对地按下，SysConfig 已配置内部上拉。上电按住不会触发，必须先松开再按。 */
 static uint8_t g_button_last_raw = 1U;
@@ -218,18 +224,13 @@ static bool parse_float_token(const char *text, float *value, const char **end)
     return true;
 }
 
-static bool vision_sample_is_plausible(float raw_position_cm,
-                                       float reported_speed_cm_s,
+static bool vision_sample_is_plausible(float position_cm,
+                                       float reported_velocity_cm_s,
                                        uint32_t sample_ms)
 {
-    float centered_position_cm = raw_position_cm - VISION_CENTER_OFFSET_CM;
-
-    if ((raw_position_cm < VISION_AXIS_MIN_CM) ||
-        (raw_position_cm > VISION_AXIS_MAX_CM) ||
-        (reported_speed_cm_s < 0.0f) ||
-        (reported_speed_cm_s > BALL_SPEED_LIMIT_CM_S) ||
-        (centered_position_cm < BALL_POSITION_MIN_CM) ||
-        (centered_position_cm > BALL_POSITION_MAX_CM)) {
+    if ((position_cm < BALL_POSITION_MIN_CM) ||
+        (position_cm > BALL_POSITION_MAX_CM) ||
+        (absf_local(reported_velocity_cm_s) > BALL_SPEED_LIMIT_CM_S)) {
         return false;
     }
 
@@ -237,10 +238,16 @@ static bool vision_sample_is_plausible(float raw_position_cm,
         uint32_t dt_ms = sample_ms - g_last_sample_ms;
         if (dt_ms <= VISION_TIMEOUT_MS) {
             float dt_s = clampf_local((float)dt_ms * 0.001f, 0.01f, 0.25f);
+            float reported_physical_cm_s =
+                absf_local(reported_velocity_cm_s) / VISION_VELOCITY_SCALE;
+            float jump_speed_cm_s = absf_local(g_ball_vel_cm_s);
+            if (reported_physical_cm_s > jump_speed_cm_s) {
+                jump_speed_cm_s = reported_physical_cm_s;
+            }
             float allowed_jump = BALL_JUMP_BASE_CM +
-                                 absf_local(g_ball_vel_cm_s) * dt_s *
+                                 jump_speed_cm_s * dt_s *
                                  BALL_JUMP_SPEED_FACTOR;
-            if (absf_local(centered_position_cm - g_ball_cm) > allowed_jump) {
+            if (absf_local(position_cm - g_ball_cm) > allowed_jump) {
                 return false;
             }
         }
@@ -274,33 +281,39 @@ static bool parse_vision_line(const char *line, float *position_cm, float *veloc
 
 static void accept_vision_line(const char *line)
 {
-    float raw_position_cm;
-    float reported_speed_cm_s;
-    float centered_position_cm;
+    float position_cm;
+    float reported_velocity_cm_s;
     float signed_velocity_cm_s = 0.0f;
     uint32_t sample_ms = now_ms();
 
-    if (parse_vision_line(line, &raw_position_cm, &reported_speed_cm_s) &&
-        vision_sample_is_plausible(raw_position_cm, reported_speed_cm_s, sample_ms)) {
-        centered_position_cm = raw_position_cm - VISION_CENTER_OFFSET_CM;
-
+    if (parse_vision_line(line, &position_cm, &reported_velocity_cm_s) &&
+        vision_sample_is_plausible(position_cm, reported_velocity_cm_s, sample_ms)) {
         if (g_ball_valid) {
             uint32_t dt_ms = sample_ms - g_last_sample_ms;
             if ((dt_ms >= 10U) && (dt_ms <= VISION_TIMEOUT_MS)) {
                 float dt_s = (float)dt_ms * 0.001f;
                 float raw_velocity_cm_s =
-                    (centered_position_cm - g_ball_cm) / dt_s;
+                    (position_cm - g_ball_cm) / dt_s;
+                float vision_velocity_cm_s =
+                    reported_velocity_cm_s / VISION_VELOCITY_SCALE;
+                float measured_velocity_cm_s;
 
                 raw_velocity_cm_s = clampf_local(raw_velocity_cm_s,
                                                   -BALL_SPEED_LIMIT_CM_S,
                                                   BALL_SPEED_LIMIT_CM_S);
+                vision_velocity_cm_s = clampf_local(vision_velocity_cm_s,
+                                                     -BALL_SPEED_LIMIT_CM_S,
+                                                     BALL_SPEED_LIMIT_CM_S);
+                measured_velocity_cm_s =
+                    (1.0f - VISION_VELOCITY_BLEND) * raw_velocity_cm_s +
+                    VISION_VELOCITY_BLEND * vision_velocity_cm_s;
                 signed_velocity_cm_s = g_ball_vel_cm_s +
                     VELOCITY_FILTER_ALPHA *
-                    (raw_velocity_cm_s - g_ball_vel_cm_s);
+                    (measured_velocity_cm_s - g_ball_vel_cm_s);
             }
         }
 
-        if (!finitef_local(centered_position_cm) ||
+        if (!finitef_local(position_cm) ||
             !finitef_local(signed_velocity_cm_s)) {
             if (g_rejected_frames < 65535U) {
                 g_rejected_frames++;
@@ -308,10 +321,9 @@ static void accept_vision_line(const char *line)
             return;
         }
 
-        g_ball_raw_cm = raw_position_cm;
-        g_ball_cm = centered_position_cm;
+        g_ball_cm = position_cm;
         g_ball_vel_cm_s = signed_velocity_cm_s;
-        g_vision_speed_cm_s = reported_speed_cm_s;
+        g_vision_vel_cm_s = reported_velocity_cm_s;
         g_last_sample_ms = sample_ms;
         g_last_data_ms = sample_ms;
         g_ball_valid = true;
@@ -333,6 +345,9 @@ static void process_uart(void)
         rx_tail = (uint16_t)((rx_tail + 1U) % RX_BUFFER_SIZE);
 
         if ((ch == '\n') || (ch == '\r')) {
+            if ((line_len > 0U) && (g_uart_lines < 99999U)) {
+                g_uart_lines++;
+            }
             if ((line_len > 0U) && !line_overflow) {
                 line_buf[line_len] = '\0';
                 accept_vision_line(line_buf);
@@ -744,7 +759,13 @@ static const char *phase_text(void)
 static const char *uart_status_text(uint32_t time_ms)
 {
     if (!g_ball_valid) {
-        return (g_rejected_frames == 0U) ? "WAIT" : "BAD";
+        if (g_uart_rx_bytes == 0U) {
+            return "WAIT";
+        }
+        if (g_rejected_frames != 0U) {
+            return "BAD";
+        }
+        return "DATA";
     }
     if ((time_ms - g_last_data_ms) > VISION_TIMEOUT_MS) {
         return "OLD";
@@ -781,20 +802,22 @@ static void oled_show_zero_setup(uint32_t time_ms)
     SSD1306_ShowString(1, 0, "SET CURRENT AS ZERO");
     SSD1306_ShowString(2, 0, "KEY:PB21 MOTOR:OFF");
     SSD1306_ShowString(3, 0, "PRESS PB21 START PID");
-    SSD1306_ShowString(4, 0, "Rx:");
-    SSD1306_ShowNum(4, 18, (int32_t)g_accepted_frames, 5);
-    SSD1306_ShowString(4, 54, "Rj:");
-    SSD1306_ShowNum(4, 72, (int32_t)g_rejected_frames, 3);
-    SSD1306_ShowString(5, 0, "P:");
+    SSD1306_ShowString(4, 0, "By:");
+    SSD1306_ShowNum(4, 18, (int32_t)g_uart_rx_bytes, 5);
+    SSD1306_ShowString(4, 60, "Ln:");
+    SSD1306_ShowNum(4, 78, (int32_t)g_uart_lines, 5);
+    SSD1306_ShowString(5, 0, "A:");
+    SSD1306_ShowNum(5, 12, (int32_t)g_accepted_frames, 5);
+    SSD1306_ShowString(5, 48, "R:");
+    SSD1306_ShowNum(5, 60, (int32_t)g_rejected_frames, 3);
+    SSD1306_ShowString(5, 84, "O:");
+    SSD1306_ShowNum(5, 96, (int32_t)g_uart_overruns, 2);
+    SSD1306_ShowString(6, 0, "P:");
     fmt_snum(g_ball_cm, 2, 2, text);
-    SSD1306_ShowString(5, 12, text);
-    SSD1306_ShowString(5, 54, "V:");
+    SSD1306_ShowString(6, 12, text);
+    SSD1306_ShowString(6, 60, "V:");
     fmt_snum(g_ball_vel_cm_s, 1, 3, text);
-    SSD1306_ShowString(5, 66, text);
-    SSD1306_ShowString(6, 0, "RAW:");
-    fmt_unum(g_ball_raw_cm, 2, 2, text);
-    SSD1306_ShowString(6, 24, text);
-    SSD1306_ShowString(6, 60, "O=12.50");
+    SSD1306_ShowString(6, 72, text);
     SSD1306_ShowString(7, 0, "NO STEP BEFORE KEY");
 }
 
@@ -907,12 +930,15 @@ static void oled_show_parameters(void)
     SSD1306_ShowNum(5, 84, (int32_t)ARRIVAL_DWELL_MS, 3);
     SSD1306_ShowString(5, 102, "ms");
 
-    SSD1306_ShowString(6, 0, "Vr:");
-    fmt_unum(g_vision_speed_cm_s, 1, 3, text);
+    SSD1306_ShowString(6, 0, "Vc:");
+    fmt_snum(g_vision_vel_cm_s, 1, 3, text);
     SSD1306_ShowString(6, 18, text);
     SSD1306_ShowString(6, 60, "Lim:+-10mm");
 
-    SSD1306_ShowString(7, 0, "Z:PB21 U:PB0/1");
+    SSD1306_ShowString(7, 0, "B:");
+    SSD1306_ShowNum(7, 12, (int32_t)g_uart_rx_bytes, 5);
+    SSD1306_ShowString(7, 54, "L:");
+    SSD1306_ShowNum(7, 66, (int32_t)g_uart_lines, 5);
 }
 
 static void oled_update(uint32_t time_ms)
