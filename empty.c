@@ -48,13 +48,12 @@
 #define ARRIVAL_TOL_CM                0.60f
 #define ARRIVAL_SPEED_CM_S            0.50f
 #define ARRIVAL_DWELL_MS              150U
-#define PLUS_TIMEOUT_MS               2200U
+#define OSC_SWITCH_POSITION_CM         4.50f
+#define PLUS_TIMEOUT_MS               3500U
 #define TASK_TIMEOUT_MS               5000U
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
 #define BALANCE_HEIGHT_MM             62.0f
-#define BALANCE_TEST_UP_MM             5.0f
-#define BALANCE_TEST_MODE              1U
 #define ACTUATOR_REL_MIN_MM          (-10.0f)
 #define ACTUATOR_REL_MAX_MM            10.0f
 
@@ -76,13 +75,13 @@
  * Kp=1.8 对应自然频率约 2.25 rad/s，Kd=1.4 对应阻尼比约 0.87；
  * Ki 仅用于抵消水管微小静态坡度。实机应根据 OLED 的 B/V/E/O 微调。
  */
-#define PID_KP_MM_PER_CM              1.80f
-#define PID_KI_MM_PER_CM_S            0.04f
-#define PID_KD_MM_PER_CM_S            1.40f
+#define PID_KP_MM_PER_CM              2.40f
+#define PID_KI_MM_PER_CM_S            0.00f
+#define PID_KD_MM_PER_CM_S            0.65f
 #define PID_INTEGRAL_ZONE_CM          2.50f
 #define PID_INTEGRAL_LIMIT_CM_S       8.00f
-#define PID_OUTPUT_LIMIT_MM           6.00f
-#define PID_OUTPUT_SLEW_MM_S          18.0f
+#define PID_OUTPUT_LIMIT_MM           8.00f
+#define PID_OUTPUT_SLEW_MM_S          60.0f
 
 #define STEPPER_MAX_SPEED_SPS        12000.0f
 #define STEPPER_ACCEL_SPS2            80000.0f
@@ -508,8 +507,7 @@ static void service_start_button(uint32_t time_ms)
     if (((time_ms - g_button_change_ms) >= BUTTON_DEBOUNCE_MS) &&
         (raw != g_button_stable)) {
         g_button_stable = raw;
-        if ((raw == 0U) && (g_phase == PHASE_READY) &&
-            (BALANCE_TEST_MODE == 0U)) {
+        if ((raw == 0U) && (g_phase == PHASE_READY)) {
             request_pid_start(time_ms);
         }
     }
@@ -557,7 +555,7 @@ static bool trajectory_update(uint32_t time_ms)
 
         case PHASE_GO_PLUS:
             g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
-            if (target_is_settled(time_ms)) {
+            if (g_ball_cm >= OSC_SWITCH_POSITION_CM) {
                 g_phase = PHASE_GO_MINUS;
                 g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
                 g_phase_start_ms = time_ms;
@@ -571,12 +569,13 @@ static bool trajectory_update(uint32_t time_ms)
 
         case PHASE_GO_MINUS:
             g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
-            if (target_is_settled(time_ms)) {
-                g_phase = PHASE_HOLD_MINUS;
+            if (g_ball_cm <= -OSC_SWITCH_POSITION_CM) {
+                g_phase = PHASE_GO_PLUS;
+                g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
                 g_phase_start_ms = time_ms;
-                g_task_finish_ms = time_ms - g_task_start_ms;
                 g_arrival_start_ms = 0U;
-            } else if ((time_ms - g_task_start_ms) > TASK_TIMEOUT_MS) {
+                pid_reset();
+            } else if ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS) {
                 enter_safe(FAULT_TASK_TIMEOUT);
                 return false;
             }
@@ -663,7 +662,7 @@ static void control_supervise(void)
                ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS)) {
         enter_safe(FAULT_PLUS_TIMEOUT);
     } else if ((g_phase == PHASE_GO_MINUS) &&
-               ((time_ms - g_task_start_ms) > TASK_TIMEOUT_MS)) {
+               ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS)) {
         enter_safe(FAULT_TASK_TIMEOUT);
     } else if ((g_phase == PHASE_HOLD_MINUS) &&
                ((time_ms - g_phase_start_ms) > FINAL_HOLD_TIMEOUT_MS)) {
@@ -810,11 +809,11 @@ static void oled_show_ready(uint32_t time_ms)
     }
     SSD1306_ShowString(0, 90, "ms");
 
-    SSD1306_ShowString(1, 0, "UP TEST:62 TO 67MM");
+    SSD1306_ShowString(1, 0, "CURRENT POS IS ZERO");
     SSD1306_ShowString(2, 0, "M:");
     SSD1306_ShowString(2, 12, motor_status_text());
-    SSD1306_ShowString(2, 48, "Ph:TEST");
-    SSD1306_ShowString(3, 0, "PB21/PID DISABLED");
+    SSD1306_ShowString(2, 48, "Ph:READY");
+    SSD1306_ShowString(3, 0, "PB21 START +-5 OSC");
     SSD1306_ShowString(4, 0, "By:");
     SSD1306_ShowNum(4, 18, (int32_t)g_uart_rx_bytes, 5);
     SSD1306_ShowString(4, 60, "Ln:");
@@ -831,7 +830,7 @@ static void oled_show_ready(uint32_t time_ms)
     SSD1306_ShowString(6, 60, "V:");
     fmt_snum(g_ball_vel_cm_s, 1, 3, text);
     SSD1306_ShowString(6, 72, text);
-    SSD1306_ShowString(7, 0, "TARGET:+5MM +04000");
+    SSD1306_ShowString(7, 0, "MODE:CONTINUOUS OSC");
 }
 
 static void oled_show_status(uint32_t time_ms)
@@ -839,7 +838,7 @@ static void oled_show_status(uint32_t time_ms)
     char text[16];
     uint32_t age_ms = time_ms - g_last_data_ms;
 
-    SSD1306_ShowString(0, 8, "TASK3 STATUS 1/2");
+    SSD1306_ShowString(0, 8, "OSC PID STATUS 1/2");
 
     SSD1306_ShowString(1, 0, "UART:");
     SSD1306_ShowString(1, 30, uart_status_text(time_ms));
@@ -1006,7 +1005,7 @@ int main(void)
     delay_ms(50U);
     SSD1306_Init();
     tmc2208_enable();
-    tmc2208_move_to((int32_t)(BALANCE_TEST_UP_MM * TMC_STEPS_PER_MM + 0.5f));
+    tmc2208_move_to(0);
     oled_update(now_ms());
     g_oled_refresh_count++;
     g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
