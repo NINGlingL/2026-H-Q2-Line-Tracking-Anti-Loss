@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#define ICM20948_CALIBRATION_SAMPLES (150U)
+
 typedef struct {
     float ax;
     float ay;
@@ -30,6 +32,7 @@ typedef struct {
 uint8_t ICM20948_Init(void);
 uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms);
 void ICM20948_StartCalibration(void);
+void ICM20948_ZeroYaw(void);
 IMU_Data ICM20948_GetLast(void);
 
 #endif

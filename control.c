@@ -18,15 +18,18 @@
 #define CURVE_BASE_PERCENT    (82.0f)
 #define CURVE_YAW_RATE_DPS    (12.0f)
 #define FINISH_BRAKE_HOLD_MS  (160UL)
-#define LAP_YAW_ARM_DEG       (330.0f)
-#define LAP_YAW_SLOW_DEG      (340.0f)
+#define LAP_YAW_ARM_DEG       (300.0f)
+#define LAP_YAW_SLOW_DEG      (330.0f)
 #define LAP_YAW_NOMINAL_DEG   (360.0f)
 #define LAP_YAW_FALLBACK_DEG  (370.0f)
-#define FINISH_BASE_PERCENT   (65.0f)
-#define START_PATTERN_YAW_GATE_DEG (350.0f)
-#define LOST_LINE_HOLD_PERCENT (55)
-#define LOST_SEARCH_SWITCH_MS  (120UL)
-#define LOST_SEARCH_INNER_PERCENT (35)
+#define FINISH_BASE_PERCENT   (45.0f)
+#define START_MARKER_YAW_GATE_DEG (330.0f)
+#define START_LINE_YAW_GATE_DEG (350.0f)
+#define LOST_LINE_HOLD_PERCENT (70)
+#define LOST_LINE_BRIDGE_MS   (700UL)
+#define LOST_SEARCH_SWITCH_MS  (150UL)
+#define LOST_SEARCH_INNER_PERCENT (45)
+#define LOST_GYRO_CORRECTION_LIMIT (40.0f)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -50,6 +53,8 @@ static uint32_t g_auto_elapsed_ms;
 static uint32_t g_finish_brake_start_ms;
 static float g_lap_yaw_accum_deg;
 static float g_lap_yaw_last_deg;
+static float g_line_lost_yaw_deg;
+static float g_line_lost_target_rate_dps;
 static uint8_t g_start_marker_armed;
 static uint8_t g_finish_braking;
 static uint8_t g_lap_yaw_tracking;
@@ -141,7 +146,7 @@ static uint8_t start_marker_detected(const EightIR_State *ir)
     active_difference = (ir->active_count >= g_start_ir_active_count) ?
         (uint8_t) (ir->active_count - g_start_ir_active_count) :
         (uint8_t) (g_start_ir_active_count - ir->active_count);
-    tolerance = (g_start_ir_active_count >= 5U) ? 2U :
+    tolerance = (g_start_ir_active_count >= 5U) ? 3U :
         (g_start_ir_active_count >= 3U) ? 1U : 0U;
 
     return (different_bits <= tolerance &&
@@ -150,14 +155,12 @@ static uint8_t start_marker_detected(const EightIR_State *ir)
 
 static uint8_t start_pattern_finish_allowed(void)
 {
-    /* A pattern containing at least three black sensors is marker-like. */
-    if (g_start_ir_active_count >= 3U) {
-        return 1U;
-    }
-    /* Ordinary one/two-sensor line patterns repeat, so require a full turn. */
+    float yaw_gate = (g_start_ir_active_count >= 3U) ?
+        START_MARKER_YAW_GATE_DEG : START_LINE_YAW_GATE_DEG;
+
+    /* Sparse start patterns repeat on the road, so give them a tighter gate. */
     return (g_finish_yaw_armed != 0U &&
-            fabsf(g_lap_yaw_accum_deg) >=
-                START_PATTERN_YAW_GATE_DEG) ? 1U : 0U;
+            fabsf(g_lap_yaw_accum_deg) >= yaw_gate) ? 1U : 0U;
 }
 
 static uint8_t lap_yaw_is_usable(void)
@@ -261,6 +264,14 @@ static void enter_auto(uint32_t now_ms)
         enter_safe(lock_reason, now_ms);
         return;
     }
+#if APP_ENABLE_IMU
+    if (lap_yaw_is_usable() == 0U) {
+        enter_safe("AUTO:WAIT IMU", now_ms);
+        return;
+    }
+    ICM20948_ZeroYaw();
+    g_imu = ICM20948_GetLast();
+#endif
     if (ir.frame_fresh == 0U) {
         enter_safe("AUTO:IR STALE", now_ms);
         return;
@@ -278,6 +289,8 @@ static void enter_auto(uint32_t now_ms)
     g_start_marker_armed = 0U;
     g_finish_braking = 0U;
     g_finish_brake_start_ms = 0U;
+    g_line_lost_yaw_deg = 0.0f;
+    g_line_lost_target_rate_dps = 0.0f;
     g_last_track_left = 0;
     g_last_track_right = 0;
     g_last_line_position = (ir.active_count > 0U) ? ir.position : 0;
@@ -510,10 +523,12 @@ static void run_auto(uint32_t now_ms)
 
     if (ir.active_count == 0U) {
         uint32_t lost_elapsed_ms;
-        uint32_t hold_ms;
         int16_t search_power;
         int16_t search_inner;
         uint8_t search_right;
+        float gyro_error = 0.0f;
+        float gyro_correction = 0.0f;
+        float heading_error;
 
         if (g_start_marker_armed != 0U &&
             g_start_ir_active_count == 0U &&
@@ -526,22 +541,60 @@ static void run_auto(uint32_t now_ms)
 
         if (g_line_lost_ms == 0U) {
             g_line_lost_ms = now_ms;
+            if (lap_yaw_is_usable() != 0U &&
+                isfinite(g_imu.yaw_rate_dps)) {
+                g_line_lost_yaw_deg = g_imu.yaw_deg;
+                g_line_lost_target_rate_dps =
+                    (float) g_last_line_position *
+                    g_control_tuning.yaw_rate_per_position;
+            } else {
+                g_line_lost_yaw_deg = 0.0f;
+                g_line_lost_target_rate_dps = 0.0f;
+            }
         }
         lost_elapsed_ms = (uint32_t) (now_ms - g_line_lost_ms);
-        hold_ms = g_control_tuning.line_lost_stop_ms / 3U;
 
-        /* Stage 1: bridge a short sensor gap using the last valid steering. */
-        if (lost_elapsed_ms < hold_ms &&
+        /* Stage 1: bridge a real track gap along the last known trajectory. */
+        if (lost_elapsed_ms < LOST_LINE_BRIDGE_MS &&
             (g_last_track_left > 0 || g_last_track_right > 0)) {
             left = (int16_t) ((int32_t) g_last_track_left *
                 LOST_LINE_HOLD_PERCENT / 100);
             right = (int16_t) ((int32_t) g_last_track_right *
                 LOST_LINE_HOLD_PERCENT / 100);
+
+            if (lap_yaw_is_usable() != 0U &&
+                isfinite(g_imu.yaw_rate_dps)) {
+                if (g_last_line_position >= -1 &&
+                    g_last_line_position <= 1) {
+                    heading_error = g_line_lost_yaw_deg - g_imu.yaw_deg;
+                    if (heading_error > 180.0f) heading_error -= 360.0f;
+                    if (heading_error < -180.0f) heading_error += 360.0f;
+                    gyro_error = heading_error * 3.0f -
+                        g_imu.yaw_rate_dps;
+                } else {
+                    gyro_error = g_line_lost_target_rate_dps -
+                        g_imu.yaw_rate_dps;
+                }
+                gyro_correction = gyro_error *
+                    g_control_tuning.yaw_kp;
+                if (gyro_correction > LOST_GYRO_CORRECTION_LIMIT) {
+                    gyro_correction = LOST_GYRO_CORRECTION_LIMIT;
+                }
+                if (gyro_correction < -LOST_GYRO_CORRECTION_LIMIT) {
+                    gyro_correction = -LOST_GYRO_CORRECTION_LIMIT;
+                }
+                left = (int16_t) ((float) left + gyro_correction);
+                right = (int16_t) ((float) right - gyro_correction);
+                if (left > output_limit) left = output_limit;
+                if (left < 0) left = 0;
+                if (right > output_limit) right = output_limit;
+                if (right < 0) right = 0;
+            }
         } else {
             /*
              * Stage 2: creep in an arc toward the last line side.  With no
              * history (for example a line between the two centre sensors at
-             * startup), alternate the arc direction every 120 ms.
+             * startup), alternate the arc direction every 150 ms.
              */
             search_power = configured_pwm_value(
                 g_control_tuning.diagnostic_pwm_permille);
@@ -575,6 +628,8 @@ static void run_auto(uint32_t now_ms)
         return;
     }
     g_line_lost_ms = 0U;
+    g_line_lost_yaw_deg = 0.0f;
+    g_line_lost_target_rate_dps = 0.0f;
     g_last_line_position = ir.position;
 
     /*
@@ -759,8 +814,9 @@ static void draw_oled(void)
         (void) snprintf(line, sizeof(line), "YAW:IMU ERR P:%d",
             ir.position);
     } else if (g_imu.calibrated == 0U) {
-        (void) snprintf(line, sizeof(line), "YAW:CAL %u/100",
-            g_imu.calibration_samples);
+        (void) snprintf(line, sizeof(line), "YAW:CAL %u/%u",
+            (unsigned int) g_imu.calibration_samples,
+            (unsigned int) ICM20948_CALIBRATION_SAMPLES);
     } else {
         yaw_tenths = (int32_t) (g_imu.yaw_deg * 10.0f);
         yaw_magnitude = (yaw_tenths < 0) ?
@@ -824,6 +880,8 @@ void Control_Init(uint32_t now_ms)
     g_finish_brake_start_ms = 0U;
     g_lap_yaw_accum_deg = 0.0f;
     g_lap_yaw_last_deg = 0.0f;
+    g_line_lost_yaw_deg = 0.0f;
+    g_line_lost_target_rate_dps = 0.0f;
     g_lap_yaw_tracking = 0U;
     g_finish_yaw_armed = 0U;
     g_last_track_left = 0;

@@ -70,7 +70,7 @@ const Control_Tuning g_control_tuning = {
     .marker_active_count      = 6U,    /* 停车线判定：中间六路同时检测黑线后立即停车 */
     .marker_clear_ms          = 80U,   /* 离开起点启停线的确认时间：单位ms */
     .marker_min_lap_ms        = 1000U, /* 起点状态离开后至少1秒才允许再次匹配，避免依赖赛道长度 */
-    .line_lost_stop_ms        = 500U,  /* 丢线后保持转向并低速扫线，超过500ms才停车 */
+    .line_lost_stop_ms        = 1200U, /* 丢线时先由陀螺仪维持轨迹再扫线，超过1.2秒才停车 */
     .auto_timeout_ms          = 35000U,/* 自动循迹最长运行时间：超时立即停车 */
     .diagnostic_timeout_ms    = 30000U /* 手动诊断模式最长运行时间：单位ms */
 };

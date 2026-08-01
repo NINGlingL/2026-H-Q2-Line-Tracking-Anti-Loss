@@ -19,7 +19,9 @@
 #define BANK_0                  (0x00U)
 #define BANK_2                  (0x20U)
 #define GYRO_RANGE_DPS          (250.0f)
-#define GYRO_CAL_SAMPLES        (100U)
+#define GYRO_CAL_SAMPLES        ICM20948_CALIBRATION_SAMPLES
+#define CAL_STILL_GYRO_DPS      (12.0f)
+#define CAL_STILL_ACCEL_ERR     (1.2f)
 #define YAW_LPF_TAU_S           (0.030f)
 #define YAW_ZERO_RATE_DPS       (0.35f)
 #define STATIONARY_GYRO_DPS     (1.5f)
@@ -280,6 +282,17 @@ void ICM20948_StartCalibration(void)
     g_stationary_samples = 0U;
 }
 
+void ICM20948_ZeroYaw(void)
+{
+    if (g_last.calibrated == 0U) {
+        return;
+    }
+    g_last.yaw_deg = 0.0f;
+    g_last.yaw_rate_dps = 0.0f;
+    g_yaw_rate_filtered = 0.0f;
+    g_yaw_rate_previous = 0.0f;
+}
+
 uint8_t ICM20948_Init(void)
 {
     static const uint8_t addresses[2] = {0x68U, 0x69U};
@@ -407,18 +420,29 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
         return 0U;
     }
 
+    accel_magnitude =
+        sqrtf(next.ax * next.ax + next.ay * next.ay + next.az * next.az);
+
     if (next.calibrated == 0U) {
         /*
-         * Average the first 100 already range-checked gyro frames. The old
-         * consecutive-stillness gate reset the counter to zero whenever a
-         * single noisy frame or a larger factory bias crossed its threshold,
-         * which could leave the display permanently at CAL 0/100.
-         * Keep the vehicle still for the roughly two-second startup window.
+         * Calibrate only from a continuous stationary window.  The generous
+         * raw-rate limit accepts normal factory bias but rejects a vehicle
+         * being carried or turned while the zero offset is being measured.
          */
-        g_cal_sum_x += raw_gx;
-        g_cal_sum_y += raw_gy;
-        g_cal_sum_z += raw_gz;
-        next.calibration_samples++;
+        if (fabsf(raw_gx) <= CAL_STILL_GYRO_DPS &&
+            fabsf(raw_gy) <= CAL_STILL_GYRO_DPS &&
+            fabsf(raw_gz) <= CAL_STILL_GYRO_DPS &&
+            fabsf(accel_magnitude - 9.80665f) <= CAL_STILL_ACCEL_ERR) {
+            g_cal_sum_x += raw_gx;
+            g_cal_sum_y += raw_gy;
+            g_cal_sum_z += raw_gz;
+            next.calibration_samples++;
+        } else {
+            g_cal_sum_x = 0.0f;
+            g_cal_sum_y = 0.0f;
+            g_cal_sum_z = 0.0f;
+            next.calibration_samples = 0U;
+        }
         if (next.calibration_samples >= GYRO_CAL_SAMPLES) {
             next.gyro_bias_x =
                 g_cal_sum_x / (float) GYRO_CAL_SAMPLES;
@@ -439,8 +463,6 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
     }
 
     if (next.calibrated != 0U) {
-        accel_magnitude =
-            sqrtf(next.ax * next.ax + next.ay * next.ay + next.az * next.az);
         stationary_candidate =
             (fabsf(next.gx) <= STATIONARY_GYRO_DPS &&
              fabsf(next.gy) <= STATIONARY_GYRO_DPS &&
