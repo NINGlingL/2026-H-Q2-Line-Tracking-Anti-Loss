@@ -11,6 +11,7 @@
  */
 const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const GPIO1  = GPIO.addInstance();
+const GPIO2  = GPIO.addInstance();
 const I2C    = scripting.addModule("/ti/driverlib/I2C", {}, false);
 const I2C1   = I2C.addInstance();
 const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
@@ -32,6 +33,14 @@ GPIO1.associatedPins[0].pin.$assign = "PA13";
 GPIO1.associatedPins[1].$name       = "EN";
 GPIO1.associatedPins[1].pin.$assign = "PA15";
 GPIO1.associatedPins[1].initialValue = "SET";
+
+/* PB21 button: active low, used only for the pre-run 65 mm balance setup. */
+GPIO2.$name                              = "KEY";
+GPIO2.port                               = "PORTB";
+GPIO2.associatedPins[0].$name            = "START";
+GPIO2.associatedPins[0].direction        = "INPUT";
+GPIO2.associatedPins[0].internalResistor = "PULL_UP";
+GPIO2.associatedPins[0].pin.$assign      = "PB21";
 
 const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
 

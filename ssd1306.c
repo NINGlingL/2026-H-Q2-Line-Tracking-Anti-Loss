@@ -172,50 +172,24 @@ static void SSD1306_WriteData(uint8_t data)
 
 void SSD1306_Init(void)
 {
+    static const uint8_t init_sequence[] = {
+        0xAEU, 0xD5U, 0x80U, 0xA8U, 0x3FU, 0xD3U, 0x00U, 0x40U,
+        0x8DU, 0x14U, 0x20U, 0x02U, 0xA1U, 0xC8U, 0xDAU, 0x12U,
+        0x81U, 0x7FU, 0xD9U, 0xF1U, 0xDBU, 0x40U, 0xA4U, 0xA6U,
+        0x2EU, 0xAFU
+    };
+    uint32_t index;
+
     s_oled_healthy = true;
-    /* 初始化序列 - 必须按这个顺序 */
-    SSD1306_WriteCmd(SSD1306_DISPLAY_OFF);
 
-    SSD1306_WriteCmd(0x20);  /* 设置内存寻址模式 */
-    SSD1306_WriteCmd(0x00);  /* 水平寻址模式 */
-
-    SSD1306_WriteCmd(0xB0);  /* 设置页起始地址 */
-
-    SSD1306_WriteCmd(0xC8);  /* COM 扫描方向: 从 COM[N-1] 到 COM0 */
-
-    SSD1306_WriteCmd(0x40);  /* 设置显示起始行 = 0 */
-
-    SSD1306_WriteCmd(SSD1306_SET_CONTRAST);
-    SSD1306_WriteCmd(0x7F);  /* 对比度 (0~255) */
-
-    SSD1306_WriteCmd(0xA1);  /* 段重映射: column 127 = SEG0 */
-
-    SSD1306_WriteCmd(0xA6);  /* 正常显示 (非反色) */
-
-    SSD1306_WriteCmd(0xA8);  /* 设置多路复用比 */
-    SSD1306_WriteCmd(0x3F);  /* 1/64 duty */
-
-    SSD1306_WriteCmd(0xA4);  /* 显示跟随 RAM 内容 */
-
-    SSD1306_WriteCmd(0xD3);  /* 设置显示偏移 */
-    SSD1306_WriteCmd(0x00);  /* 无偏移 */
-
-    SSD1306_WriteCmd(0xD5);  /* 设置时钟分频/振荡器频率 */
-    SSD1306_WriteCmd(0xF0);
-
-    SSD1306_WriteCmd(0xD9);  /* 设置预充电周期 */
-    SSD1306_WriteCmd(0x22);
-
-    SSD1306_WriteCmd(0xDA);  /* 设置 COM 引脚配置 */
-    SSD1306_WriteCmd(0x12);
-
-    SSD1306_WriteCmd(0xDB);  /* 设置 VCOMH 电压 */
-    SSD1306_WriteCmd(0x20);
-
-    SSD1306_WriteCmd(0x8D);  /* 电荷泵设置 */
-    SSD1306_WriteCmd(0x14);  /* 启用电荷泵 */
-
-    SSD1306_WriteCmd(SSD1306_DISPLAY_ON);
+    /* 与“电赛备用2”实机驱动一致：上电等待并使用 page addressing。 */
+    delay_cycles(CPUCLK_FREQ / 10U);
+    for (index = 0U; index < sizeof(init_sequence); index++) {
+        SSD1306_WriteCmd(init_sequence[index]);
+        if (!s_oled_healthy) {
+            return;
+        }
+    }
 
     SSD1306_Clear();
     SSD1306_Update();

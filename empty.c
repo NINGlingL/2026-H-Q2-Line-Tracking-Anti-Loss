@@ -8,9 +8,9 @@
  * 第三问轨迹:
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
- * 机械零点:
- *   100 mm 丝杆上，移动端距电机端 65 mm 时水管水平。由于当前硬件没有
- *   原点开关，上电前必须手动放到 65 mm 位置；软件把该点记为相对 0 mm。
+ * 平衡位置设置:
+ *   机构上电时必须位于电机端起点；按下 PB21 后，软件把该点标为 -65 mm，
+ *   自动移动到相对 0 mm（距电机端 65 mm）的水管水平位置。
  */
 
 #include "ti_msp_dl_config.h"
@@ -26,6 +26,9 @@
 #define WAIT_VISION_TIMEOUT_MS        10000U
 #define OLED_REFRESH_MS               200U
 #define OLED_PAGE_PERIOD_MS           2000U
+#define BUTTON_DEBOUNCE_MS             30U
+#define WAIT_BUTTON_TIMEOUT_MS         300000U
+#define BALANCE_MOVE_TIMEOUT_MS        15000U
 
 #define BALL_CENTER_CM                0.0f
 #define BALL_STEP_CM                  5.0f
@@ -154,6 +157,11 @@ static uint32_t g_last_data_ms = 0U;
 static uint32_t g_last_sample_ms = 0U;
 static uint32_t g_accepted_frames = 0U;
 static uint16_t g_rejected_frames = 0U;
+
+/* PB21 对地按下，SysConfig 已配置内部上拉。上电按住不会触发，必须先松开再按。 */
+static uint8_t g_button_last_raw = 1U;
+static uint8_t g_button_stable = 1U;
+static uint32_t g_button_change_ms = 0U;
 
 static bool parse_float_token(const char *text, float *value, const char **end)
 {
@@ -364,7 +372,9 @@ static bool pid_update(float error_cm, float ball_velocity_cm_s, float dt_s, flo
 
 /* ==================== 第三问状态机 ==================== */
 typedef enum {
-    PHASE_WAIT_VISION = 0,
+    PHASE_WAIT_BALANCE = 0,
+    PHASE_BALANCE_MOVE,
+    PHASE_WAIT_VISION,
     PHASE_GO_PLUS,
     PHASE_GO_MINUS,
     PHASE_HOLD_MINUS,
@@ -373,6 +383,8 @@ typedef enum {
 
 typedef enum {
     FAULT_NONE = 0,
+    FAULT_BUTTON_TIMEOUT,
+    FAULT_BALANCE_MOVE_TIMEOUT,
     FAULT_WAIT_VISION_TIMEOUT,
     FAULT_VISION_TIMEOUT,
     FAULT_PLUS_TIMEOUT,
@@ -381,9 +393,8 @@ typedef enum {
     FAULT_PID_NUMERIC
 } FaultCode;
 
-static ControlPhase g_phase = PHASE_WAIT_VISION;
+static ControlPhase g_phase = PHASE_WAIT_BALANCE;
 static FaultCode g_fault = FAULT_NONE;
-static uint32_t g_boot_ms = 0U;
 static uint32_t g_phase_start_ms = 0U;
 static uint32_t g_task_start_ms = 0U;
 static uint32_t g_arrival_start_ms = 0U;
@@ -398,6 +409,38 @@ static void enter_safe(FaultCode fault)
     g_fault = fault;
     g_phase = PHASE_SAFE;
     g_phase_start_ms = now_ms();
+}
+
+static void start_balance_move(uint32_t time_ms)
+{
+    int32_t motor_end_steps = (int32_t)(ACTUATOR_REL_MIN_MM * TMC_STEPS_PER_MM);
+
+    /*
+     * 只有初始等待状态允许执行一次。该相对坐标确保 65 mm 行程仍经过
+     * tmc2208_move_to() 的物理/应用双重限位，不允许超过 100 mm 丝杆范围。
+     */
+    tmc2208_set_current_position(motor_end_steps);
+    tmc2208_enable();
+    tmc2208_move_to(0);
+    g_phase = PHASE_BALANCE_MOVE;
+    g_phase_start_ms = time_ms;
+}
+
+static void service_balance_button(uint32_t time_ms)
+{
+    uint8_t raw = (DL_GPIO_readPins(KEY_PORT, KEY_START_PIN) == 0U) ? 0U : 1U;
+
+    if (raw != g_button_last_raw) {
+        g_button_last_raw = raw;
+        g_button_change_ms = time_ms;
+    }
+    if (((time_ms - g_button_change_ms) >= BUTTON_DEBOUNCE_MS) &&
+        (raw != g_button_stable)) {
+        g_button_stable = raw;
+        if ((raw == 0U) && (g_phase == PHASE_WAIT_BALANCE)) {
+            start_balance_move(time_ms);
+        }
+    }
 }
 
 static bool target_is_settled(uint32_t time_ms)
@@ -419,8 +462,23 @@ static bool target_is_settled(uint32_t time_ms)
 static bool trajectory_update(uint32_t time_ms)
 {
     switch (g_phase) {
+        case PHASE_WAIT_BALANCE:
+            if ((time_ms - g_phase_start_ms) > WAIT_BUTTON_TIMEOUT_MS) {
+                enter_safe(FAULT_BUTTON_TIMEOUT);
+            }
+            break;
+
+        case PHASE_BALANCE_MOVE:
+            if (!tmc2208_is_moving() && (tmc2208_get_position() == 0)) {
+                g_phase = PHASE_WAIT_VISION;
+                g_phase_start_ms = time_ms;
+            } else if ((time_ms - g_phase_start_ms) > BALANCE_MOVE_TIMEOUT_MS) {
+                enter_safe(FAULT_BALANCE_MOVE_TIMEOUT);
+            }
+            break;
+
         case PHASE_WAIT_VISION:
-            if (g_ball_valid) {
+            if (!vision_lost()) {
                 g_phase = PHASE_GO_PLUS;
                 g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
                 g_phase_start_ms = time_ms;
@@ -428,8 +486,7 @@ static bool trajectory_update(uint32_t time_ms)
                 g_arrival_start_ms = 0U;
                 g_last_control_ms = time_ms - VISION_PERIOD_MS;
                 pid_reset();
-                tmc2208_enable();
-            } else if ((time_ms - g_boot_ms) > WAIT_VISION_TIMEOUT_MS) {
+            } else if ((time_ms - g_phase_start_ms) > WAIT_VISION_TIMEOUT_MS) {
                 enter_safe(FAULT_WAIT_VISION_TIMEOUT);
                 return false;
             }
@@ -474,7 +531,9 @@ static bool trajectory_update(uint32_t time_ms)
         default:
             return false;
     }
-    return g_phase != PHASE_WAIT_VISION;
+    return (g_phase == PHASE_GO_PLUS) ||
+           (g_phase == PHASE_GO_MINUS) ||
+           (g_phase == PHASE_HOLD_MINUS);
 }
 
 static void control_step(void)
@@ -519,12 +578,16 @@ static void control_supervise(void)
 {
     uint32_t time_ms = now_ms();
 
-    if ((g_phase != PHASE_WAIT_VISION) && (g_phase != PHASE_SAFE) && vision_lost()) {
+    if (((g_phase == PHASE_GO_PLUS) ||
+         (g_phase == PHASE_GO_MINUS) ||
+         (g_phase == PHASE_HOLD_MINUS)) && vision_lost()) {
         enter_safe(FAULT_VISION_TIMEOUT);
         return;
     }
 
-    if (g_phase == PHASE_WAIT_VISION) {
+    if ((g_phase == PHASE_WAIT_BALANCE) ||
+        (g_phase == PHASE_BALANCE_MOVE) ||
+        (g_phase == PHASE_WAIT_VISION)) {
         (void)trajectory_update(time_ms);
     } else if ((g_phase == PHASE_GO_PLUS) &&
                ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS)) {
@@ -624,6 +687,8 @@ static void fmt_unum(float value, int decimals, int max_integer_digits, char *bu
 static const char *phase_text(void)
 {
     switch (g_phase) {
+        case PHASE_WAIT_BALANCE: return "SET";
+        case PHASE_BALANCE_MOVE:return "CAL";
         case PHASE_WAIT_VISION: return "WAIT";
         case PHASE_GO_PLUS:     return "GO+5";
         case PHASE_GO_MINUS:    return "GO-5";
@@ -650,6 +715,34 @@ static const char *motor_status_text(void)
         return "OFF";
     }
     return tmc2208_is_moving() ? "MOVE" : "IDLE";
+}
+
+static void oled_show_balance_setup(void)
+{
+    char text[16];
+    float from_motor_mm = NEUTRAL_FROM_MOTOR_MM +
+                          (float)tmc2208_get_position() / TMC_STEPS_PER_MM;
+
+    from_motor_mm = clampf_local(from_motor_mm, 0.0f, ACTUATOR_TRAVEL_MM);
+    if (g_phase == PHASE_WAIT_BALANCE) {
+        SSD1306_ShowString(0, 20, "BALANCE SETUP");
+        SSD1306_ShowString(2, 0, "START AT MOTOR END");
+        SSD1306_ShowString(3, 0, "PRESS PB21");
+        SSD1306_ShowString(4, 0, "AUTO MOVE:65.0mm");
+        SSD1306_ShowString(5, 0, "MOTOR:OFF");
+        SSD1306_ShowString(7, 0, "PID LOCKED");
+    } else {
+        SSD1306_ShowString(0, 14, "SETTING BALANCE");
+        SSD1306_ShowString(2, 0, "MOTOR:");
+        SSD1306_ShowString(2, 36, motor_status_text());
+        SSD1306_ShowString(3, 0, "POS:");
+        fmt_unum(from_motor_mm, 1, 2, text);
+        SSD1306_ShowString(3, 24, text);
+        SSD1306_ShowString(3, 54, "mm");
+        SSD1306_ShowString(4, 0, "TARGET:65.0mm");
+        SSD1306_ShowString(6, 0, "WAIT UNTIL READY");
+        SSD1306_ShowString(7, 0, "DO NOT MOVE PIPE");
+    }
 }
 
 static void oled_show_status(uint32_t time_ms)
@@ -766,12 +859,20 @@ static void oled_show_parameters(void)
     SSD1306_ShowString(6, 24, text);
     SSD1306_ShowString(6, 54, "mm 800st/mm");
 
-    SSD1306_ShowString(7, 0, "UART:115200 PB0/1");
+    SSD1306_ShowString(7, 0, "KEY:PB21 U:PB0/1");
 }
 
 static void oled_update(uint32_t time_ms)
 {
     uint32_t page = (time_ms / OLED_PAGE_PERIOD_MS) & 1U;
+
+    if ((g_phase == PHASE_WAIT_BALANCE) ||
+        (g_phase == PHASE_BALANCE_MOVE)) {
+        SSD1306_Clear();
+        oled_show_balance_setup();
+        SSD1306_Update();
+        return;
+    }
 
     /* 故障页必须持续可见，避免参数轮播遮住故障码和电机关闭状态。 */
     if (g_phase == PHASE_SAFE) {
@@ -794,11 +895,15 @@ int main(void)
 
     SYSCFG_DL_init();
     SysTick_Config(CPUCLK_FREQ / 1000U);
-    g_boot_ms = now_ms();
+    g_phase_start_ms = now_ms();
+    g_button_last_raw =
+        (DL_GPIO_readPins(KEY_PORT, KEY_START_PIN) == 0U) ? 0U : 1U;
+    g_button_stable = g_button_last_raw;
+    g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 参数/零点 -> 等待视觉 -> 最后使能。
-     * 上电前手动将移动端置于距电机端 65 mm 的水平位置。
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 自动走 65 mm
+     * -> 等待视觉 -> PID。按键前机构必须位于电机端起点。
      */
     tmc2208_init();
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
@@ -808,12 +913,7 @@ int main(void)
 
     delay_ms(50U);
     SSD1306_Init();
-    SSD1306_Clear();
-    SSD1306_ShowString(0, 14, "TASK3 BALL PID");
-    SSD1306_ShowString(2, 0, "Set nut:65.0mm");
-    SSD1306_ShowString(3, 0, "Motor disabled");
-    SSD1306_ShowString(5, 0, "Waiting vision");
-    SSD1306_Update();
+    oled_update(now_ms());
 
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
     last_ui_ms = now_ms();
@@ -821,6 +921,8 @@ int main(void)
     while (1) {
         uint32_t time_ms;
 
+        time_ms = now_ms();
+        service_balance_button(time_ms);
         process_uart();
         if (g_ball_new) {
             g_ball_new = false;

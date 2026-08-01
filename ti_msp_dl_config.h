@@ -128,6 +128,12 @@ extern "C" {
 
 
 
+/* Port definition for Pin Group KEY */
+#define KEY_PORT                                                         (GPIOB)
+
+/* Defines for START: GPIOB.21 with pinCMx 49 on package pin 20 */
+#define KEY_START_PIN                                           (DL_GPIO_PIN_21)
+#define KEY_START_IOMUX                                          (IOMUX_PINCM49)
 /* Port definition for Pin Group TMC2208 */
 #define TMC2208_PORT                                                     (GPIOA)
 
