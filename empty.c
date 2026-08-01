@@ -26,7 +26,8 @@
 /* ==================== 已知接口与机械参数 ==================== */
 #define UART_BAUDRATE_BPS             115200U
 #define VISION_PERIOD_MS              50U
-#define VISION_TIMEOUT_MS             250U
+#define VISION_HOLD_MS                150U
+#define VISION_TIMEOUT_MS             700U
 #define WAIT_VISION_TIMEOUT_MS        10000U
 #define OLED_REFRESH_MS               100U
 #define OLED_PAGE_PERIOD_MS           2000U
@@ -57,10 +58,10 @@
 
 /*
  * PID 输出为控制端相对水平位置的位移量。
- * 图 2 中铰链在左、控制端在右：控制端抬高会使球向负坐标滚动。
- * 若实机“正步数”实际让控制端下降，把此值改为 +1。
+ * 实机复测：+4800 步时小球到达负坐标 -4.08 cm，因此正步数会让球
+ * 向负坐标运动；正位置误差必须映射为负电机位移。
  */
-#define MOTOR_POSITIVE_LIFTS_END      0
+#define MOTOR_POSITIVE_LIFTS_END      1
 #if MOTOR_POSITIVE_LIFTS_END
 #define CONTROL_TO_MOTOR_SIGN        (-1.0f)
 #else
@@ -637,12 +638,19 @@ static void control_step(void)
 static void control_supervise(void)
 {
     uint32_t time_ms = now_ms();
+    bool active = (g_phase == PHASE_GO_PLUS) ||
+                  (g_phase == PHASE_GO_MINUS) ||
+                  (g_phase == PHASE_HOLD_MINUS);
 
-    if (((g_phase == PHASE_GO_PLUS) ||
-         (g_phase == PHASE_GO_MINUS) ||
-         (g_phase == PHASE_HOLD_MINUS)) && vision_lost()) {
-        enter_safe(FAULT_VISION_TIMEOUT);
-        return;
+    if (active) {
+        if (vision_lost()) {
+            enter_safe(FAULT_VISION_TIMEOUT);
+            return;
+        }
+        if ((time_ms - g_last_data_ms) > VISION_HOLD_MS) {
+            /* 短时漏检先停止 STEP 并保持当前位置，恢复帧到达后自动续控。 */
+            tmc2208_stop();
+        }
     }
 
     if ((g_phase == PHASE_READY) ||
@@ -924,10 +932,10 @@ static void oled_show_parameters(void)
     SSD1306_ShowString(4, 54, "Acc:");
     SSD1306_ShowNum(4, 78, (int32_t)STEPPER_ACCEL_SPS2, 5);
 
-    SSD1306_ShowString(5, 0, "Lost:");
-    SSD1306_ShowNum(5, 30, (int32_t)VISION_TIMEOUT_MS, 3);
-    SSD1306_ShowString(5, 54, " Dwl:");
-    SSD1306_ShowNum(5, 84, (int32_t)ARRIVAL_DWELL_MS, 3);
+    SSD1306_ShowString(5, 0, "Hold:");
+    SSD1306_ShowNum(5, 30, (int32_t)VISION_HOLD_MS, 3);
+    SSD1306_ShowString(5, 54, "Lost:");
+    SSD1306_ShowNum(5, 84, (int32_t)VISION_TIMEOUT_MS, 3);
     SSD1306_ShowString(5, 102, "ms");
 
     SSD1306_ShowString(6, 0, "Vc:");
