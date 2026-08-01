@@ -86,9 +86,9 @@
 #define STEPPER_MAX_SPEED_SPS        12000.0f
 #define STEPPER_ACCEL_SPS2            80000.0f
 
-/* 临时硬件隔离测试：绕过视觉/PID，每段直发 3200 脉冲（约 4 mm）。 */
+/* 临时硬件隔离测试：绕过视觉/PID，每段直发 4500 脉冲（约 5.6 mm）。 */
 #define MOTOR_SELF_TEST_MODE           1U
-#define MOTOR_SELF_TEST_STEPS        3200U
+#define MOTOR_SELF_TEST_STEPS        4500U
 #define MOTOR_SELF_TEST_PULSE_CYCLES (CPUCLK_FREQ / 2000U)
 
 #if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
@@ -987,8 +987,8 @@ static void oled_show_motor_test(int8_t direction, uint32_t legs)
 {
     SSD1306_Clear();
     SSD1306_ShowString(0, 8, "MOTOR GPIO TEST");
-    SSD1306_ShowString(2, 0, "PULSE:3200");
-    SSD1306_ShowString(3, 0, "DIST :4.0mm");
+    SSD1306_ShowString(2, 0, "PULSE:4500");
+    SSD1306_ShowString(3, 0, "DIST :5.6mm");
     SSD1306_ShowString(4, 0, "DIR  :");
     SSD1306_ShowString(4, 42, (direction < 0) ? "REVERSE" : "FORWARD");
     SSD1306_ShowString(6, 0, "LEG  :");
