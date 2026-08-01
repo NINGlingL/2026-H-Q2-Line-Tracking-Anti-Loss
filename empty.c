@@ -996,7 +996,8 @@ int main(void)
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
     tmc2208_set_accel(STEPPER_ACCEL_SPS2);
     tmc2208_set_limits_mm(ACTUATOR_REL_MIN_MM, ACTUATOR_REL_MAX_MM);
-    tmc2208_set_current_position(0);
+    /* 一次性实机恢复：FAULT:03 照片确认停机位置为 +4800 步。 */
+    tmc2208_set_current_position(4800);
 
     delay_ms(50U);
     SSD1306_Init();
