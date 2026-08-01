@@ -16,9 +16,9 @@
 #define STEP_CLK_HZ        STEP_INST_CLK_FREQ /* 32 MHz BUSCLK / 8 = 4 MHz */
 #define HARD_MAX_SPEED_SPS 12000.0f
 #define HARD_MAX_ACCEL_SPS2 80000.0f
-#define TMC_DIRECTION_INVERTED 1
-#define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_REL_MM * TMC_STEPS_PER_MM))
-#define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_REL_MM * TMC_STEPS_PER_MM))
+#define TMC_UP_DIRECTION_PIN_LEVEL 0
+#define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_MM * TMC_STEPS_PER_MM))
+#define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_MM * TMC_STEPS_PER_MM))
 
 /* ==================== 内部状态 ==================== */
 static volatile int32_t  s_position  = 0;      /* 当前绝对位置 (步) */
@@ -35,7 +35,7 @@ static const float    s_min_speed = 200.0f;    /* 起步 / 低速兜底 */
 static volatile float s_cur_speed = 0.0f;      /* 当前速度 */
 static volatile bool  s_decel     = false;     /* 已进入减速段 */
 
-/* 软限位 (步), 默认 ±40000 步 = ±50mm */
+/* 软限位使用最低点起算的绝对坐标，默认覆盖 0~100 mm。 */
 static int32_t s_min_limit = HARD_MIN_LIMIT_STEPS;
 static int32_t s_max_limit = HARD_MAX_LIMIT_STEPS;
 
@@ -75,19 +75,19 @@ static void stop_stepping(void)
 
 static void set_direction_pin(int8_t direction)
 {
-#if TMC_DIRECTION_INVERTED
     if (direction > 0) {
-        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    } else {
+#if TMC_UP_DIRECTION_PIN_LEVEL
         DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    }
 #else
-    if (direction > 0) {
-        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    } else {
         DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    }
 #endif
+    } else {
+#if TMC_UP_DIRECTION_PIN_LEVEL
+        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+#else
+        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
+#endif
+    }
 }
 
 /* ==================== API ==================== */
@@ -96,7 +96,7 @@ void tmc2208_init(void)
 {
     /* DIR/EN 已由 SysConfig 配置为输出; 这里设成安全默认: 禁用驱动 */
     DL_GPIO_setPins(TMC2208_PORT, TMC2208_EN_PIN);    /* EN 高 = 禁用 */
-    set_direction_pin(1);                            /* 校准后的正方向：远离电机端 */
+    set_direction_pin(1);                            /* 正方向：从最低点向上 */
 
     stop_stepping();
     s_enabled  = false;
@@ -129,11 +129,11 @@ void tmc2208_set_limits_mm(float min_mm, float max_mm)
     int32_t min_steps;
     int32_t max_steps;
 
-    if (min_mm < TMC_HARD_MIN_REL_MM) min_mm = TMC_HARD_MIN_REL_MM;
-    if (max_mm > TMC_HARD_MAX_REL_MM) max_mm = TMC_HARD_MAX_REL_MM;
+    if (min_mm < TMC_HARD_MIN_MM) min_mm = TMC_HARD_MIN_MM;
+    if (max_mm > TMC_HARD_MAX_MM) max_mm = TMC_HARD_MAX_MM;
     if (min_mm >= max_mm) {
-        min_mm = TMC_HARD_MIN_REL_MM;
-        max_mm = TMC_HARD_MAX_REL_MM;
+        min_mm = TMC_HARD_MIN_MM;
+        max_mm = TMC_HARD_MAX_MM;
     }
 
     min_steps = (int32_t)(min_mm * TMC_STEPS_PER_MM);

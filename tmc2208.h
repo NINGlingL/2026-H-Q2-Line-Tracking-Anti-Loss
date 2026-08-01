@@ -28,16 +28,15 @@
 #define TMC_STEPS_PER_REV         ((uint32_t)(TMC_MOTOR_STEPS_PER_REV * TMC_MICROSTEPS))  /* 1600 */
 #define TMC_STEPS_PER_MM          ((float)TMC_STEPS_PER_REV / TMC_LEAD_MM)                 /* 800 */
 
-/* 100 mm 行程，当前调试水平点距电机端 77 mm；软件坐标以水平点为 0。 */
-#define TMC_NEUTRAL_FROM_MOTOR_MM 77.0f
-#define TMC_TRAVEL_MM             100.0f
-#define TMC_HARD_MIN_REL_MM      (-TMC_NEUTRAL_FROM_MOTOR_MM)
-#define TMC_HARD_MAX_REL_MM       (TMC_TRAVEL_MM - TMC_NEUTRAL_FROM_MOTOR_MM)
+/* 物理绝对坐标：丝杆最低点为 0 mm，向上为正，最高点为 100 mm。 */
+#define TMC_HARD_MIN_MM           0.0f
+#define TMC_HARD_MAX_MM           100.0f
+#define TMC_TRAVEL_MM             (TMC_HARD_MAX_MM - TMC_HARD_MIN_MM)
 
 /* ============ 运动参数 ============ */
 void  tmc2208_set_max_speed(float steps_per_s);   /* 最大步进速度 (步/s) */
 void  tmc2208_set_accel(float steps_per_s2);      /* 加速度 (步/s^2) */
-void  tmc2208_set_limits_mm(float min_mm, float max_mm); /* 相对水平点软限位 */
+void  tmc2208_set_limits_mm(float min_mm, float max_mm); /* 最低点起算的绝对软限位 */
 void  tmc2208_set_current_position(int32_t steps);/* 把当前位置标定为某值 (清零用) */
 
 /* ============ 基本控制 ============ */
