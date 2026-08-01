@@ -25,6 +25,8 @@
 #define FINISH_BASE_PERCENT   (65.0f)
 #define START_PATTERN_YAW_GATE_DEG (350.0f)
 #define LOST_LINE_HOLD_PERCENT (55)
+#define LOST_SEARCH_SWITCH_MS  (120UL)
+#define LOST_SEARCH_INNER_PERCENT (35)
 
 static Control_State g_control;
 static PID_Controller g_line_pid;
@@ -36,6 +38,7 @@ static int16_t g_manual_left;
 static int16_t g_manual_right;
 static int16_t g_last_track_left;
 static int16_t g_last_track_right;
+static int8_t g_last_line_position;
 static uint32_t g_last_control_ms;
 static uint32_t g_last_oled_ms;
 static uint32_t g_last_oled_recovery_ms;
@@ -216,6 +219,7 @@ static void enter_safe(const char *reason, uint32_t now_ms)
     g_manual_right = 0;
     g_last_track_left = 0;
     g_last_track_right = 0;
+    g_last_line_position = 0;
     if (reason != NULL) {
         (void) snprintf(
             g_last_command, sizeof(g_last_command), "%s", reason);
@@ -257,8 +261,8 @@ static void enter_auto(uint32_t now_ms)
         enter_safe(lock_reason, now_ms);
         return;
     }
-    if (ir.frame_fresh == 0U || ir.active_count == 0U) {
-        enter_safe("AUTO:NO LINE", now_ms);
+    if (ir.frame_fresh == 0U) {
+        enter_safe("AUTO:IR STALE", now_ms);
         return;
     }
     Moto_SetSafetyPermit(1U);
@@ -276,6 +280,7 @@ static void enter_auto(uint32_t now_ms)
     g_finish_brake_start_ms = 0U;
     g_last_track_left = 0;
     g_last_track_right = 0;
+    g_last_line_position = (ir.active_count > 0U) ? ir.position : 0;
     g_start_ir_raw = ir.raw;
     g_start_ir_active_count = ir.active_count;
     g_start_ir_valid = 1U;
@@ -505,30 +510,72 @@ static void run_auto(uint32_t now_ms)
 
     if (ir.active_count == 0U) {
         uint32_t lost_elapsed_ms;
+        uint32_t hold_ms;
+        int16_t search_power;
+        int16_t search_inner;
+        uint8_t search_right;
+
+        if (g_start_marker_armed != 0U &&
+            g_start_ir_active_count == 0U &&
+            g_auto_elapsed_ms >= g_control_tuning.marker_min_lap_ms &&
+            start_pattern_finish_allowed() != 0U &&
+            start_marker_detected(&ir) != 0U) {
+            begin_finish_brake("LINE BRAKE", now_ms);
+            return;
+        }
 
         if (g_line_lost_ms == 0U) {
             g_line_lost_ms = now_ms;
         }
         lost_elapsed_ms = (uint32_t) (now_ms - g_line_lost_ms);
+        hold_ms = g_control_tuning.line_lost_stop_ms / 3U;
 
-        /* Brief gaps keep the last steering direction at reduced power. */
-        if (g_last_track_left > 0 || g_last_track_right > 0) {
+        /* Stage 1: bridge a short sensor gap using the last valid steering. */
+        if (lost_elapsed_ms < hold_ms &&
+            (g_last_track_left > 0 || g_last_track_right > 0)) {
             left = (int16_t) ((int32_t) g_last_track_left *
                 LOST_LINE_HOLD_PERCENT / 100);
             right = (int16_t) ((int32_t) g_last_track_right *
                 LOST_LINE_HOLD_PERCENT / 100);
-            g_control.left_command = left;
-            g_control.right_command = right;
-            Moto_SetLR(left, right);
         } else {
-            Moto_EmergencyStop();
+            /*
+             * Stage 2: creep in an arc toward the last line side.  With no
+             * history (for example a line between the two centre sensors at
+             * startup), alternate the arc direction every 120 ms.
+             */
+            search_power = configured_pwm_value(
+                g_control_tuning.diagnostic_pwm_permille);
+            if (search_power < 120) {
+                search_power = (output_limit >= 120) ? 120 : output_limit;
+            }
+            search_inner = (int16_t) ((int32_t) search_power *
+                LOST_SEARCH_INNER_PERCENT / 100);
+            if (g_last_line_position > 0) {
+                search_right = 1U;
+            } else if (g_last_line_position < 0) {
+                search_right = 0U;
+            } else {
+                search_right = (uint8_t)
+                    ((lost_elapsed_ms / LOST_SEARCH_SWITCH_MS) & 1U);
+            }
+            if (search_right != 0U) {
+                left = search_power;
+                right = search_inner;
+            } else {
+                left = search_inner;
+                right = search_power;
+            }
         }
+        g_control.left_command = left;
+        g_control.right_command = right;
+        Moto_SetLR(left, right);
         if (lost_elapsed_ms >= g_control_tuning.line_lost_stop_ms) {
             enter_safe("LINE LOST", now_ms);
         }
         return;
     }
     g_line_lost_ms = 0U;
+    g_last_line_position = ir.position;
 
     /*
      * A is a transverse black start/stop line.  Do not accept it until the
@@ -781,6 +828,7 @@ void Control_Init(uint32_t now_ms)
     g_finish_yaw_armed = 0U;
     g_last_track_left = 0;
     g_last_track_right = 0;
+    g_last_line_position = 0;
     g_start_ir_raw = 0xFFU;
     g_start_ir_active_count = 0U;
     g_start_ir_valid = 0U;
