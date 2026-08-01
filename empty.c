@@ -53,6 +53,8 @@
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
 #define BALANCE_HEIGHT_MM             62.0f
+#define BALANCE_TEST_UP_MM             5.0f
+#define BALANCE_TEST_MODE              1U
 #define ACTUATOR_REL_MIN_MM          (-10.0f)
 #define ACTUATOR_REL_MAX_MM            10.0f
 
@@ -506,7 +508,8 @@ static void service_start_button(uint32_t time_ms)
     if (((time_ms - g_button_change_ms) >= BUTTON_DEBOUNCE_MS) &&
         (raw != g_button_stable)) {
         g_button_stable = raw;
-        if ((raw == 0U) && (g_phase == PHASE_READY)) {
+        if ((raw == 0U) && (g_phase == PHASE_READY) &&
+            (BALANCE_TEST_MODE == 0U)) {
             request_pid_start(time_ms);
         }
     }
@@ -807,9 +810,11 @@ static void oled_show_ready(uint32_t time_ms)
     }
     SSD1306_ShowString(0, 90, "ms");
 
-    SSD1306_ShowString(1, 0, "BALANCE:62.0MM HOLD");
-    SSD1306_ShowString(2, 0, "M:IDLE Ph:READY");
-    SSD1306_ShowString(3, 0, "PRESS PB21 START PID");
+    SSD1306_ShowString(1, 0, "UP TEST:62 TO 67MM");
+    SSD1306_ShowString(2, 0, "M:");
+    SSD1306_ShowString(2, 12, motor_status_text());
+    SSD1306_ShowString(2, 48, "Ph:TEST");
+    SSD1306_ShowString(3, 0, "PB21/PID DISABLED");
     SSD1306_ShowString(4, 0, "By:");
     SSD1306_ShowNum(4, 18, (int32_t)g_uart_rx_bytes, 5);
     SSD1306_ShowString(4, 60, "Ln:");
@@ -826,7 +831,7 @@ static void oled_show_ready(uint32_t time_ms)
     SSD1306_ShowString(6, 60, "V:");
     fmt_snum(g_ball_vel_cm_s, 1, 3, text);
     SSD1306_ShowString(6, 72, text);
-    SSD1306_ShowString(7, 0, "PB21 ONLY STARTS PID");
+    SSD1306_ShowString(7, 0, "TARGET:+5MM +04000");
 }
 
 static void oled_show_status(uint32_t time_ms)
@@ -1001,7 +1006,7 @@ int main(void)
     delay_ms(50U);
     SSD1306_Init();
     tmc2208_enable();
-    tmc2208_move_to(0);
+    tmc2208_move_to((int32_t)(BALANCE_TEST_UP_MM * TMC_STEPS_PER_MM + 0.5f));
     oled_update(now_ms());
     g_oled_refresh_count++;
     g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
