@@ -9,8 +9,8 @@
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
  * 平衡位置设置:
- *   机构上电时必须位于电机端起点；按下 PB21 后，软件把该点标为 -55 mm，
- *   自动移动到相对 0 mm（距电机端 55 mm）的水管水平位置。
+ *   机构上电时必须位于电机端起点；按下 PB21 后，软件把该点标为 -77 mm，
+ *   自动移动到相对 0 mm（距电机端 77 mm）的水管水平位置。
  */
 
 #include "ti_msp_dl_config.h"
@@ -45,7 +45,7 @@
 #define TASK_TIMEOUT_MS               5000U
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
-#define NEUTRAL_FROM_MOTOR_MM         55.0f
+#define NEUTRAL_FROM_MOTOR_MM         77.0f
 #define ACTUATOR_TRAVEL_MM            100.0f
 #define ACTUATOR_REL_MIN_MM          (-NEUTRAL_FROM_MOTOR_MM)
 #define ACTUATOR_REL_MAX_MM           (ACTUATOR_TRAVEL_MM - NEUTRAL_FROM_MOTOR_MM)
@@ -420,7 +420,7 @@ static void start_balance_move(uint32_t time_ms)
     int32_t motor_end_steps = (int32_t)(ACTUATOR_REL_MIN_MM * TMC_STEPS_PER_MM);
 
     /*
-     * 只有初始等待状态允许执行一次。该相对坐标确保 55 mm 行程仍经过
+     * 只有初始等待状态允许执行一次。该相对坐标确保 77 mm 行程仍经过
      * tmc2208_move_to() 的物理/应用双重限位，不允许超过 100 mm 丝杆范围。
      */
     tmc2208_set_current_position(motor_end_steps);
@@ -743,9 +743,9 @@ static void oled_show_balance_setup(uint32_t time_ms)
     SSD1306_ShowString(0, 90, "ms");
 
     if (g_phase == PHASE_WAIT_BALANCE) {
-        SSD1306_ShowString(1, 0, "BAL SET 55.0MM");
+        SSD1306_ShowString(1, 0, "BAL SET 77.0MM");
         SSD1306_ShowString(2, 0, "KEY:PB21 M:OFF");
-        SSD1306_ShowString(3, 0, "PRESS TO AUTO MOVE");
+        SSD1306_ShowString(3, 0, "PRESS PB21 TO MOVE");
         SSD1306_ShowString(4, 0, "Rx:");
         SSD1306_ShowNum(4, 18, (int32_t)g_accepted_frames, 5);
         SSD1306_ShowString(4, 54, "Rj:");
@@ -759,14 +759,14 @@ static void oled_show_balance_setup(uint32_t time_ms)
         SSD1306_ShowString(6, 0, "START:MOTOR END");
         SSD1306_ShowString(7, 0, "PID:LOCKED");
     } else {
-        SSD1306_ShowString(1, 0, "SETTING 55.0MM");
+        SSD1306_ShowString(1, 0, "SETTING 77.0MM");
         SSD1306_ShowString(2, 0, "MOTOR:");
         SSD1306_ShowString(2, 36, motor_status_text());
         SSD1306_ShowString(3, 0, "POS:");
         fmt_unum(from_motor_mm, 1, 2, text);
         SSD1306_ShowString(3, 24, text);
         SSD1306_ShowString(3, 54, "mm");
-        SSD1306_ShowString(4, 0, "TARGET:55.0mm");
+        SSD1306_ShowString(4, 0, "TARGET:77.0mm");
         SSD1306_ShowString(5, 0, "Rx:");
         SSD1306_ShowNum(5, 18, (int32_t)g_accepted_frames, 5);
         SSD1306_ShowString(5, 54, "Rj:");
@@ -933,7 +933,7 @@ int main(void)
     g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 自动走 55 mm
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 自动走 77 mm
      * -> 等待视觉 -> PID。按键前机构必须位于电机端起点。
      */
     tmc2208_init();

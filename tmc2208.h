@@ -28,8 +28,8 @@
 #define TMC_STEPS_PER_REV         ((uint32_t)(TMC_MOTOR_STEPS_PER_REV * TMC_MICROSTEPS))  /* 1600 */
 #define TMC_STEPS_PER_MM          ((float)TMC_STEPS_PER_REV / TMC_LEAD_MM)                 /* 800 */
 
-/* 100 mm 行程，当前调试水平点距电机端 55 mm；软件坐标以水平点为 0。 */
-#define TMC_NEUTRAL_FROM_MOTOR_MM 55.0f
+/* 100 mm 行程，当前调试水平点距电机端 77 mm；软件坐标以水平点为 0。 */
+#define TMC_NEUTRAL_FROM_MOTOR_MM 77.0f
 #define TMC_TRAVEL_MM             100.0f
 #define TMC_HARD_MIN_REL_MM      (-TMC_NEUTRAL_FROM_MOTOR_MM)
 #define TMC_HARD_MAX_REL_MM       (TMC_TRAVEL_MM - TMC_NEUTRAL_FROM_MOTOR_MM)

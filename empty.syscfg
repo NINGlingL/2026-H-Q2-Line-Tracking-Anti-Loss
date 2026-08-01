@@ -34,7 +34,7 @@ GPIO1.associatedPins[1].$name       = "EN";
 GPIO1.associatedPins[1].pin.$assign = "PA15";
 GPIO1.associatedPins[1].initialValue = "SET";
 
-/* PB21 button: active low, used only for the pre-run 55 mm balance setup. */
+/* PB21 button: active low, used only for the pre-run 77 mm balance setup. */
 GPIO2.$name                              = "KEY";
 GPIO2.port                               = "PORTB";
 GPIO2.associatedPins[0].$name            = "START";
