@@ -8,6 +8,12 @@
 /* ========== 显示缓冲区 (128x64 = 1024 字节) ========== */
 static uint8_t OLED_Buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
 static bool s_oled_healthy = true;
+static uint8_t s_oled_address = SSD1306_I2C_ADDR;
+static uint8_t s_next_page = 0U;
+
+#define OLED_I2C_TIMEOUT_LOOPS   ((CPUCLK_FREQ / 1000UL) * 10UL)
+#define OLED_I2C_HALF_PERIOD     (CPUCLK_FREQ / 200000UL)
+#define OLED_PAGES_PER_UPDATE    3U
 
 /* ========== 6x8 ASCII 字库 (字符 0x20 ~ 0x7E) ========== */
 static const uint8_t Font6x8[][6] = {
@@ -108,64 +114,176 @@ static const uint8_t Font6x8[][6] = {
     {0x08,0x04,0x08,0x10,0x08,0x00}, /* ~ */
 };
 
-/* ========== 底层 I2C 通信 ========== */
+/* ========== 稳定的软件 I2C（参考“电赛备用2”） ========== */
 
-static bool I2C_WaitStatusSet(uint32_t mask)
+static void i2c_delay(void)
 {
-    uint32_t loops = (CPUCLK_FREQ / 8000U) * SSD1306_I2C_TIMEOUT_MS;
-    while ((DL_I2C_getControllerStatus(I2C_0_INST) & mask) == 0U) {
-        if (loops-- == 0U) {
+    delay_cycles(OLED_I2C_HALF_PERIOD);
+}
+
+static void sda_low(void)
+{
+    DL_GPIO_clearPins(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN);
+    DL_GPIO_enableOutput(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN);
+}
+
+static void sda_release(void)
+{
+    DL_GPIO_disableOutput(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN);
+}
+
+static void scl_low(void)
+{
+    DL_GPIO_clearPins(GPIO_I2C_0_SCL_PORT, GPIO_I2C_0_SCL_PIN);
+    DL_GPIO_enableOutput(GPIO_I2C_0_SCL_PORT, GPIO_I2C_0_SCL_PIN);
+}
+
+static void scl_release(void)
+{
+    DL_GPIO_disableOutput(GPIO_I2C_0_SCL_PORT, GPIO_I2C_0_SCL_PIN);
+}
+
+static void configure_gpio_i2c(void)
+{
+    DL_I2C_disableController(I2C_0_INST);
+    DL_GPIO_initDigitalInputFeatures(GPIO_I2C_0_IOMUX_SDA,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initDigitalInputFeatures(GPIO_I2C_0_IOMUX_SCL,
+        DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_clearPins(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN);
+    DL_GPIO_clearPins(GPIO_I2C_0_SCL_PORT, GPIO_I2C_0_SCL_PIN);
+    sda_release();
+    scl_release();
+}
+
+static bool wait_scl_high(void)
+{
+    uint32_t timeout = OLED_I2C_TIMEOUT_LOOPS;
+
+    scl_release();
+    while (DL_GPIO_readPins(GPIO_I2C_0_SCL_PORT, GPIO_I2C_0_SCL_PIN) == 0U) {
+        if (timeout-- == 0U) {
             return false;
         }
     }
     return true;
 }
 
-static bool I2C_WaitStatusClear(uint32_t mask)
+static bool i2c_start(void)
 {
-    uint32_t loops = (CPUCLK_FREQ / 8000U) * SSD1306_I2C_TIMEOUT_MS;
-    while ((DL_I2C_getControllerStatus(I2C_0_INST) & mask) != 0U) {
-        if (loops-- == 0U) {
+    sda_release();
+    if (!wait_scl_high()) {
+        return false;
+    }
+    i2c_delay();
+    if (DL_GPIO_readPins(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN) == 0U) {
+        return false;
+    }
+    sda_low();
+    i2c_delay();
+    scl_low();
+    return true;
+}
+
+static void i2c_stop(void)
+{
+    sda_low();
+    i2c_delay();
+    (void)wait_scl_high();
+    i2c_delay();
+    sda_release();
+    i2c_delay();
+}
+
+static bool i2c_write_byte(uint8_t value)
+{
+    uint8_t bit;
+    bool acknowledged;
+
+    for (bit = 0U; bit < 8U; bit++) {
+        if ((value & 0x80U) != 0U) {
+            sda_release();
+        } else {
+            sda_low();
+        }
+        i2c_delay();
+        if (!wait_scl_high()) {
+            scl_low();
+            return false;
+        }
+        i2c_delay();
+        scl_low();
+        value <<= 1U;
+    }
+
+    sda_release();
+    i2c_delay();
+    if (!wait_scl_high()) {
+        scl_low();
+        return false;
+    }
+    acknowledged =
+        (DL_GPIO_readPins(GPIO_I2C_0_SDA_PORT, GPIO_I2C_0_SDA_PIN) == 0U);
+    i2c_delay();
+    scl_low();
+    return acknowledged;
+}
+
+static bool write_command(uint8_t command)
+{
+    bool ok = i2c_start() &&
+              i2c_write_byte((uint8_t)(s_oled_address << 1U)) &&
+              i2c_write_byte(SSD1306_CMD_SINGLE) &&
+              i2c_write_byte(command);
+
+    i2c_stop();
+    if (!ok) {
+        s_oled_healthy = false;
+    }
+    return ok;
+}
+
+static bool write_page(uint8_t page)
+{
+    uint8_t column;
+    const uint8_t *data = &OLED_Buffer[(uint16_t)page * SSD1306_WIDTH];
+
+    if (!write_command((uint8_t)(0xB0U + page)) ||
+        !write_command(0x00U) || !write_command(0x10U)) {
+        return false;
+    }
+    if (!i2c_start() ||
+        !i2c_write_byte((uint8_t)(s_oled_address << 1U)) ||
+        !i2c_write_byte(SSD1306_DATA_STREAM)) {
+        i2c_stop();
+        s_oled_healthy = false;
+        return false;
+    }
+    for (column = 0U; column < SSD1306_WIDTH; column++) {
+        if (!i2c_write_byte(data[column])) {
+            i2c_stop();
+            s_oled_healthy = false;
             return false;
         }
     }
+    i2c_stop();
     return true;
 }
 
-static bool I2C_WriteBytes(uint8_t *data, uint8_t len)
+static void recover_i2c_bus(void)
 {
-    if (!s_oled_healthy) {
-        return false;
-    }
-    if (!I2C_WaitStatusSet(DL_I2C_CONTROLLER_STATUS_IDLE)) {
-        s_oled_healthy = false;
-        return false;
-    }
+    uint8_t pulse;
 
-    DL_I2C_fillControllerTXFIFO(I2C_0_INST, data, len);
-    DL_I2C_startControllerTransfer(I2C_0_INST, SSD1306_I2C_ADDR,
-                                   DL_I2C_CONTROLLER_DIRECTION_TX, len);
-    if (!I2C_WaitStatusClear(DL_I2C_CONTROLLER_STATUS_BUSY_BUS) ||
-        !I2C_WaitStatusSet(DL_I2C_CONTROLLER_STATUS_IDLE)) {
-        DL_I2C_resetControllerTransfer(I2C_0_INST);
-        DL_I2C_flushControllerTXFIFO(I2C_0_INST);
-        s_oled_healthy = false;
-        return false;
+    sda_release();
+    for (pulse = 0U; pulse < 9U; pulse++) {
+        scl_low();
+        i2c_delay();
+        (void)wait_scl_high();
+        i2c_delay();
     }
-    DL_I2C_flushControllerTXFIFO(I2C_0_INST);
-    return true;
-}
-
-static void SSD1306_WriteCmd(uint8_t cmd)
-{
-    uint8_t buf[2] = {SSD1306_CMD_SINGLE, cmd};
-    (void)I2C_WriteBytes(buf, 2);
-}
-
-static void SSD1306_WriteData(uint8_t data)
-{
-    uint8_t buf[2] = {SSD1306_DATA_STREAM, data};
-    (void)I2C_WriteBytes(buf, 2);
+    i2c_stop();
 }
 
 /* ========== 基本操作 ========== */
@@ -178,21 +296,39 @@ void SSD1306_Init(void)
         0x81U, 0x7FU, 0xD9U, 0xF1U, 0xDBU, 0x40U, 0xA4U, 0xA6U,
         0x2EU, 0xAFU
     };
-    uint32_t index;
+    static const uint8_t addresses[] = {SSD1306_I2C_ADDR, 0x3DU};
+    uint8_t address_index;
+    uint8_t command_index;
+    uint8_t page;
 
-    s_oled_healthy = true;
+    configure_gpio_i2c();
+    recover_i2c_bus();
+    s_next_page = 0U;
 
-    /* 与“电赛备用2”实机驱动一致：上电等待并使用 page addressing。 */
+    /* 与“电赛备用2”实机驱动一致：100 kHz 软件 I2C + page addressing。 */
     delay_cycles(CPUCLK_FREQ / 10U);
-    for (index = 0U; index < sizeof(init_sequence); index++) {
-        SSD1306_WriteCmd(init_sequence[index]);
-        if (!s_oled_healthy) {
-            return;
+    for (address_index = 0U; address_index < sizeof(addresses); address_index++) {
+        s_oled_address = addresses[address_index];
+        s_oled_healthy = true;
+        for (command_index = 0U; command_index < sizeof(init_sequence);
+             command_index++) {
+            if (!write_command(init_sequence[command_index])) {
+                break;
+            }
+        }
+        if (s_oled_healthy) {
+            SSD1306_Clear();
+            for (page = 0U; page < SSD1306_PAGES; page++) {
+                if (!write_page(page)) {
+                    break;
+                }
+            }
+            if (s_oled_healthy) {
+                return;
+            }
         }
     }
-
-    SSD1306_Clear();
-    SSD1306_Update();
+    s_oled_healthy = false;
 }
 
 bool SSD1306_IsHealthy(void)
@@ -212,17 +348,16 @@ void SSD1306_Fill(uint8_t data)
 
 void SSD1306_Update(void)
 {
-    for (uint8_t page = 0; page < SSD1306_PAGES; page++) {
-        if (!s_oled_healthy) {
+    uint8_t count;
+
+    for (count = 0U; (count < OLED_PAGES_PER_UPDATE) && s_oled_healthy;
+         count++) {
+        if (!write_page(s_next_page)) {
             return;
         }
-        SSD1306_WriteCmd(0xB0 + page);  /* 设置页 */
-        SSD1306_WriteCmd(0x00);          /* 设置列低四位 */
-        SSD1306_WriteCmd(0x10);          /* 设置列高四位 */
-
-        /* 批量发送一页数据 */
-        for (uint8_t col = 0; col < SSD1306_WIDTH; col++) {
-            SSD1306_WriteData(OLED_Buffer[page * SSD1306_WIDTH + col]);
+        s_next_page++;
+        if (s_next_page >= SSD1306_PAGES) {
+            s_next_page = 0U;
         }
     }
 }
