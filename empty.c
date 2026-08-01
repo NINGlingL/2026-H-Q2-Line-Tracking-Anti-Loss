@@ -88,8 +88,8 @@
 
 /* 临时硬件隔离测试：绕过视觉/PID，在软件零点附近自动往返 ±3 mm。 */
 #define MOTOR_SELF_TEST_MODE           1U
-#define MOTOR_SELF_TEST_STEPS        2400
-#define MOTOR_SELF_TEST_DWELL_MS       600U
+#define MOTOR_SELF_TEST_STEPS        1600U
+#define MOTOR_SELF_TEST_PULSE_CYCLES (CPUCLK_FREQ / 2000U)
 
 #if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
 #error "UART baud rate must match MaixCAM protocol (115200 bps)"
@@ -987,8 +987,8 @@ static void oled_update(uint32_t time_ms)
 int main(void)
 {
     uint32_t last_ui_ms;
-    uint32_t last_motor_test_ms;
-    int32_t motor_test_target = MOTOR_SELF_TEST_STEPS;
+    uint32_t motor_test_steps = 0U;
+    int8_t motor_test_direction = 1;
 
     SYSCFG_DL_init();
     SysTick_Config(CPUCLK_FREQ / 1000U);
@@ -1010,16 +1010,26 @@ int main(void)
     tmc2208_set_current_position(0);
 
     delay_ms(50U);
-    SSD1306_Init();
     tmc2208_enable();
     tmc2208_move_to(0);
-    oled_update(now_ms());
-    g_oled_refresh_count++;
-    g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
+    if (MOTOR_SELF_TEST_MODE != 0U) {
+        /* 彻底绕过 TIMA0，把 PA8 改成普通 GPIO 手动产生 STEP 脉冲。 */
+        DL_TimerA_stopCounter(STEP_INST);
+        DL_TimerA_disableInterrupt(STEP_INST, DL_TIMERA_INTERRUPT_ZERO_EVENT);
+        DL_GPIO_initDigitalOutput(GPIO_STEP_C0_IOMUX);
+        DL_GPIO_clearPins(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
+        DL_GPIO_enableOutput(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
+        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    }
+    if (MOTOR_SELF_TEST_MODE == 0U) {
+        SSD1306_Init();
+        oled_update(now_ms());
+        g_oled_refresh_count++;
+        g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
+    }
 
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
     last_ui_ms = now_ms();
-    last_motor_test_ms = last_ui_ms;
 
     while (1) {
         uint32_t time_ms;
@@ -1027,11 +1037,19 @@ int main(void)
         time_ms = now_ms();
         process_uart();
         if (MOTOR_SELF_TEST_MODE != 0U) {
-            if (!tmc2208_is_moving() &&
-                ((time_ms - last_motor_test_ms) >= MOTOR_SELF_TEST_DWELL_MS)) {
-                tmc2208_move_to(motor_test_target);
-                motor_test_target = -motor_test_target;
-                last_motor_test_ms = time_ms;
+            DL_GPIO_setPins(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
+            delay_cycles(MOTOR_SELF_TEST_PULSE_CYCLES);
+            DL_GPIO_clearPins(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
+            delay_cycles(MOTOR_SELF_TEST_PULSE_CYCLES);
+            motor_test_steps++;
+            if (motor_test_steps >= MOTOR_SELF_TEST_STEPS) {
+                motor_test_steps = 0U;
+                motor_test_direction = (int8_t)-motor_test_direction;
+                if (motor_test_direction > 0) {
+                    DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
+                } else {
+                    DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+                }
             }
         } else {
             service_start_button(time_ms);
@@ -1043,7 +1061,8 @@ int main(void)
         }
 
         time_ms = now_ms();
-        if ((time_ms - last_ui_ms) >= OLED_REFRESH_MS) {
+        if ((MOTOR_SELF_TEST_MODE == 0U) &&
+            ((time_ms - last_ui_ms) >= OLED_REFRESH_MS)) {
             last_ui_ms = time_ms;
             oled_update(time_ms);
             g_oled_refresh_count++;
