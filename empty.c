@@ -2,15 +2,18 @@
  * 车载平衡滚球运动控制系统 - 第三问
  *
  * MaixCAM Pro -> UART0:
- *   P:<position_cm>,V:<signed_velocity_cm_s>\n, 115200 8N1, 20 Hz
+ *   P:<position_0_to_25_cm>,V:<speed_magnitude_cm_s>\n, 115200 8N1, 20 Hz
  *   按本工程 SysConfig 接线：Maix TX -> MSPM0 PB1(RX)，Maix RX -> PB0(TX)。
+ *   视觉程序把水管左端映射为 0 cm、右端映射为 25 cm；MCU 内部减去
+ *   12.5 cm 得到以中心 O 为零点的有符号位置。视觉 V 是速度大小、没有方向，
+ *   MCU 使用连续位置差分得到有符号速度供 PID 微分项使用。
  *
  * 第三问轨迹:
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
  * 平衡位置设置:
- *   本次单功能测试从 67 mm 位置开始。
- *   按下 PB21 后再向下移动 5 mm，到达 62 mm 并保持。
+ *   上电后电机保持禁用；按下 PB21，把机构当前位置记录为步进电机软件零点，
+ *   随即使能闭环，不产生预置移动。
  */
 
 #include "ti_msp_dl_config.h"
@@ -28,15 +31,18 @@
 #define OLED_PAGE_PERIOD_MS           2000U
 #define BUTTON_DEBOUNCE_MS             30U
 #define WAIT_BUTTON_TIMEOUT_MS         300000U
-#define BALANCE_MOVE_TIMEOUT_MS         5000U
 
 #define BALL_CENTER_CM                0.0f
 #define BALL_STEP_CM                  5.0f
-#define BALL_POSITION_MIN_CM         -13.5f
-#define BALL_POSITION_MAX_CM          13.5f
+#define VISION_AXIS_MIN_CM             0.0f
+#define VISION_AXIS_MAX_CM            25.0f
+#define VISION_CENTER_OFFSET_CM       12.5f
+#define BALL_POSITION_MIN_CM         (VISION_AXIS_MIN_CM - VISION_CENTER_OFFSET_CM)
+#define BALL_POSITION_MAX_CM         (VISION_AXIS_MAX_CM - VISION_CENTER_OFFSET_CM)
 #define BALL_SPEED_LIMIT_CM_S         150.0f
 #define BALL_JUMP_BASE_CM             2.0f
 #define BALL_JUMP_SPEED_FACTOR        1.8f
+#define VELOCITY_FILTER_ALPHA          0.35f
 
 #define ARRIVAL_TOL_CM                0.60f
 #define ARRIVAL_SPEED_CM_S            0.50f
@@ -45,13 +51,8 @@
 #define TASK_TIMEOUT_MS               5000U
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
-#define BALANCE_HEIGHT_MM             77.0f
-#define TEST_START_HEIGHT_MM          67.0f
-#define TEST_DESCENT_MM                5.0f
-#define TEST_TARGET_HEIGHT_MM         (TEST_START_HEIGHT_MM - TEST_DESCENT_MM)
-#define ACTUATOR_MIN_MM                0.0f
-#define ACTUATOR_MAX_MM              100.0f
-#define ACTUATOR_TRAVEL_MM           (ACTUATOR_MAX_MM - ACTUATOR_MIN_MM)
+#define ACTUATOR_REL_MIN_MM          (-10.0f)
+#define ACTUATOR_REL_MAX_MM            10.0f
 
 /*
  * PID 输出为控制端相对水平位置的位移量。
@@ -66,19 +67,21 @@
 #endif
 
 /*
- * 首次上机参数。视觉端发出的速度带 VELOCITY_SCALE=0.3，因此 Kd 已按该比例
- * 补偿；实机仍应先悬空/低幅验证方向，再根据轨迹记录微调。
+ * 25 cm 摆杆、小钢球纯滚动的线性近似为：
+ *   x'' ~= (5/7)g*(u/250 mm) ~= 2.8*u  cm/s^2（u 的单位为 mm）。
+ * Kp=1.8 对应自然频率约 2.25 rad/s，Kd=1.4 对应阻尼比约 0.87；
+ * Ki 仅用于抵消水管微小静态坡度。实机应根据 OLED 的 B/V/E/O 微调。
  */
-#define PID_KP_MM_PER_CM              1.20f
+#define PID_KP_MM_PER_CM              1.80f
 #define PID_KI_MM_PER_CM_S            0.04f
-#define PID_KD_MM_PER_CM_S            2.60f
+#define PID_KD_MM_PER_CM_S            1.40f
 #define PID_INTEGRAL_ZONE_CM          2.50f
 #define PID_INTEGRAL_LIMIT_CM_S       8.00f
 #define PID_OUTPUT_LIMIT_MM           6.00f
 #define PID_OUTPUT_SLEW_MM_S          18.0f
 
-#define STEPPER_MAX_SPEED_SPS         5000.0f
-#define STEPPER_ACCEL_SPS2            24000.0f
+#define STEPPER_MAX_SPEED_SPS        12000.0f
+#define STEPPER_ACCEL_SPS2            80000.0f
 
 #if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
 #error "UART baud rate must match MaixCAM protocol (115200 bps)"
@@ -152,8 +155,10 @@ static char line_buf[LINE_BUF_SIZE];
 static uint8_t line_len = 0U;
 static bool line_overflow = false;
 
+static float g_ball_raw_cm = VISION_CENTER_OFFSET_CM;
 static float g_ball_cm = BALL_CENTER_CM;
-static float g_ball_vel_cm_s = 0.0f;
+static float g_ball_vel_cm_s = 0.0f;          /* MCU 差分得到的有符号轴向速度 */
+static float g_vision_speed_cm_s = 0.0f;      /* 视觉 V：仅为非负速度大小 */
 static bool g_ball_valid = false;
 static bool g_ball_new = false;
 static uint32_t g_last_data_ms = 0U;
@@ -213,21 +218,31 @@ static bool parse_float_token(const char *text, float *value, const char **end)
     return true;
 }
 
-static bool vision_sample_is_plausible(float position_cm, float velocity_cm_s, uint32_t sample_ms)
+static bool vision_sample_is_plausible(float raw_position_cm,
+                                       float reported_speed_cm_s,
+                                       uint32_t sample_ms)
 {
-    if ((position_cm < BALL_POSITION_MIN_CM) ||
-        (position_cm > BALL_POSITION_MAX_CM) ||
-        (absf_local(velocity_cm_s) > BALL_SPEED_LIMIT_CM_S)) {
+    float centered_position_cm = raw_position_cm - VISION_CENTER_OFFSET_CM;
+
+    if ((raw_position_cm < VISION_AXIS_MIN_CM) ||
+        (raw_position_cm > VISION_AXIS_MAX_CM) ||
+        (reported_speed_cm_s < 0.0f) ||
+        (reported_speed_cm_s > BALL_SPEED_LIMIT_CM_S) ||
+        (centered_position_cm < BALL_POSITION_MIN_CM) ||
+        (centered_position_cm > BALL_POSITION_MAX_CM)) {
         return false;
     }
 
     if (g_ball_valid) {
         uint32_t dt_ms = sample_ms - g_last_sample_ms;
-        float dt_s = clampf_local((float)dt_ms * 0.001f, 0.01f, 0.25f);
-        float allowed_jump = BALL_JUMP_BASE_CM +
-                             absf_local(g_ball_vel_cm_s) * dt_s * BALL_JUMP_SPEED_FACTOR;
-        if (absf_local(position_cm - g_ball_cm) > allowed_jump) {
-            return false;
+        if (dt_ms <= VISION_TIMEOUT_MS) {
+            float dt_s = clampf_local((float)dt_ms * 0.001f, 0.01f, 0.25f);
+            float allowed_jump = BALL_JUMP_BASE_CM +
+                                 absf_local(g_ball_vel_cm_s) * dt_s *
+                                 BALL_JUMP_SPEED_FACTOR;
+            if (absf_local(centered_position_cm - g_ball_cm) > allowed_jump) {
+                return false;
+            }
         }
     }
     return true;
@@ -259,14 +274,44 @@ static bool parse_vision_line(const char *line, float *position_cm, float *veloc
 
 static void accept_vision_line(const char *line)
 {
-    float position_cm;
-    float velocity_cm_s;
+    float raw_position_cm;
+    float reported_speed_cm_s;
+    float centered_position_cm;
+    float signed_velocity_cm_s = 0.0f;
     uint32_t sample_ms = now_ms();
 
-    if (parse_vision_line(line, &position_cm, &velocity_cm_s) &&
-        vision_sample_is_plausible(position_cm, velocity_cm_s, sample_ms)) {
-        g_ball_cm = position_cm;
-        g_ball_vel_cm_s = velocity_cm_s;
+    if (parse_vision_line(line, &raw_position_cm, &reported_speed_cm_s) &&
+        vision_sample_is_plausible(raw_position_cm, reported_speed_cm_s, sample_ms)) {
+        centered_position_cm = raw_position_cm - VISION_CENTER_OFFSET_CM;
+
+        if (g_ball_valid) {
+            uint32_t dt_ms = sample_ms - g_last_sample_ms;
+            if ((dt_ms >= 10U) && (dt_ms <= VISION_TIMEOUT_MS)) {
+                float dt_s = (float)dt_ms * 0.001f;
+                float raw_velocity_cm_s =
+                    (centered_position_cm - g_ball_cm) / dt_s;
+
+                raw_velocity_cm_s = clampf_local(raw_velocity_cm_s,
+                                                  -BALL_SPEED_LIMIT_CM_S,
+                                                  BALL_SPEED_LIMIT_CM_S);
+                signed_velocity_cm_s = g_ball_vel_cm_s +
+                    VELOCITY_FILTER_ALPHA *
+                    (raw_velocity_cm_s - g_ball_vel_cm_s);
+            }
+        }
+
+        if (!finitef_local(centered_position_cm) ||
+            !finitef_local(signed_velocity_cm_s)) {
+            if (g_rejected_frames < 65535U) {
+                g_rejected_frames++;
+            }
+            return;
+        }
+
+        g_ball_raw_cm = raw_position_cm;
+        g_ball_cm = centered_position_cm;
+        g_ball_vel_cm_s = signed_velocity_cm_s;
+        g_vision_speed_cm_s = reported_speed_cm_s;
         g_last_sample_ms = sample_ms;
         g_last_data_ms = sample_ms;
         g_ball_valid = true;
@@ -379,9 +424,7 @@ static bool pid_update(float error_cm, float ball_velocity_cm_s, float dt_s, flo
 
 /* ==================== 第三问状态机 ==================== */
 typedef enum {
-    PHASE_WAIT_BALANCE = 0,
-    PHASE_TEST_MOVE,
-    PHASE_TEST_DONE,
+    PHASE_WAIT_ZERO = 0,
     PHASE_WAIT_VISION,
     PHASE_GO_PLUS,
     PHASE_GO_MINUS,
@@ -392,7 +435,6 @@ typedef enum {
 typedef enum {
     FAULT_NONE = 0,
     FAULT_BUTTON_TIMEOUT,
-    FAULT_BALANCE_MOVE_TIMEOUT,
     FAULT_WAIT_VISION_TIMEOUT,
     FAULT_VISION_TIMEOUT,
     FAULT_PLUS_TIMEOUT,
@@ -401,7 +443,7 @@ typedef enum {
     FAULT_PID_NUMERIC
 } FaultCode;
 
-static ControlPhase g_phase = PHASE_WAIT_BALANCE;
+static ControlPhase g_phase = PHASE_WAIT_ZERO;
 static FaultCode g_fault = FAULT_NONE;
 static uint32_t g_phase_start_ms = 0U;
 static uint32_t g_task_start_ms = 0U;
@@ -419,21 +461,21 @@ static void enter_safe(FaultCode fault)
     g_phase_start_ms = now_ms();
 }
 
-static void start_down_move(uint32_t time_ms)
+static void record_zero_and_arm(uint32_t time_ms)
 {
-    int32_t start_steps =
-        (int32_t)(TEST_START_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
-    int32_t target_steps =
-        (int32_t)(TEST_TARGET_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
-
     /*
-     * 当前位置由用户确认在 67 mm。PB21 只在初始等待状态响应一次，
-     * 目标从 53600 微步降到 49600 微步，即再向下移动 5 mm。
+     * 用户已把机构调到当前平衡位置。PB21 不产生任何 STEP 脉冲，
+     * 只停止定时器、把当前位置记为 0，并在 ±10 mm 安全范围内使能闭环。
      */
-    tmc2208_set_current_position(start_steps);
+    tmc2208_stop();
+    tmc2208_set_current_position(0);
+    tmc2208_set_limits_mm(ACTUATOR_REL_MIN_MM, ACTUATOR_REL_MAX_MM);
     tmc2208_enable();
-    tmc2208_move_to(target_steps);
-    g_phase = PHASE_TEST_MOVE;
+    pid_reset();
+    g_target_cm = BALL_CENTER_CM;
+    g_error_cm = 0.0f;
+    g_control_mm = 0.0f;
+    g_phase = PHASE_WAIT_VISION;
     g_phase_start_ms = time_ms;
 }
 
@@ -448,8 +490,8 @@ static void service_balance_button(uint32_t time_ms)
     if (((time_ms - g_button_change_ms) >= BUTTON_DEBOUNCE_MS) &&
         (raw != g_button_stable)) {
         g_button_stable = raw;
-        if ((raw == 0U) && (g_phase == PHASE_WAIT_BALANCE)) {
-            start_down_move(time_ms);
+        if ((raw == 0U) && (g_phase == PHASE_WAIT_ZERO)) {
+            record_zero_and_arm(time_ms);
         }
     }
 }
@@ -473,25 +515,10 @@ static bool target_is_settled(uint32_t time_ms)
 static bool trajectory_update(uint32_t time_ms)
 {
     switch (g_phase) {
-        case PHASE_WAIT_BALANCE:
+        case PHASE_WAIT_ZERO:
             if ((time_ms - g_phase_start_ms) > WAIT_BUTTON_TIMEOUT_MS) {
                 enter_safe(FAULT_BUTTON_TIMEOUT);
             }
-            break;
-
-        case PHASE_TEST_MOVE:
-            if (!tmc2208_is_moving() &&
-                (tmc2208_get_position() ==
-                 (int32_t)(TEST_TARGET_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f))) {
-                /* 单功能验证阶段：到位后保持使能，不自动进入视觉 PID。 */
-                g_phase = PHASE_TEST_DONE;
-                g_phase_start_ms = time_ms;
-            } else if ((time_ms - g_phase_start_ms) > BALANCE_MOVE_TIMEOUT_MS) {
-                enter_safe(FAULT_BALANCE_MOVE_TIMEOUT);
-            }
-            break;
-
-        case PHASE_TEST_DONE:
             break;
 
         case PHASE_WAIT_VISION:
@@ -558,7 +585,6 @@ static void control_step(void)
     uint32_t time_ms = now_ms();
     float dt_s;
     float motor_relative_mm;
-    float motor_absolute_mm;
     float steps_float;
     int32_t target_steps;
 
@@ -579,15 +605,17 @@ static void control_step(void)
     motor_relative_mm = clampf_local(motor_relative_mm,
                                      -PID_OUTPUT_LIMIT_MM,
                                      PID_OUTPUT_LIMIT_MM);
-    motor_absolute_mm = clampf_local(BALANCE_HEIGHT_MM + motor_relative_mm,
-                                     ACTUATOR_MIN_MM,
-                                     ACTUATOR_MAX_MM);
+    motor_relative_mm = clampf_local(motor_relative_mm,
+                                     ACTUATOR_REL_MIN_MM,
+                                     ACTUATOR_REL_MAX_MM);
 
-    steps_float = motor_absolute_mm * TMC_STEPS_PER_MM;
+    steps_float = motor_relative_mm * TMC_STEPS_PER_MM;
     steps_float = clampf_local(steps_float,
-                               ACTUATOR_MIN_MM * TMC_STEPS_PER_MM,
-                               ACTUATOR_MAX_MM * TMC_STEPS_PER_MM);
-    target_steps = (int32_t)(steps_float + 0.5f);
+                               -PID_OUTPUT_LIMIT_MM * TMC_STEPS_PER_MM,
+                               PID_OUTPUT_LIMIT_MM * TMC_STEPS_PER_MM);
+    target_steps = (steps_float >= 0.0f) ?
+                   (int32_t)(steps_float + 0.5f) :
+                   (int32_t)(steps_float - 0.5f);
     tmc2208_move_to(target_steps);
 }
 
@@ -602,8 +630,7 @@ static void control_supervise(void)
         return;
     }
 
-    if ((g_phase == PHASE_WAIT_BALANCE) ||
-        (g_phase == PHASE_TEST_MOVE) ||
+    if ((g_phase == PHASE_WAIT_ZERO) ||
         (g_phase == PHASE_WAIT_VISION)) {
         (void)trajectory_update(time_ms);
     } else if ((g_phase == PHASE_GO_PLUS) &&
@@ -704,9 +731,7 @@ static void fmt_unum(float value, int decimals, int max_integer_digits, char *bu
 static const char *phase_text(void)
 {
     switch (g_phase) {
-        case PHASE_WAIT_BALANCE: return "SET";
-        case PHASE_TEST_MOVE:   return "DOWN";
-        case PHASE_TEST_DONE:   return "DONE";
+        case PHASE_WAIT_ZERO:   return "ZERO";
         case PHASE_WAIT_VISION: return "WAIT";
         case PHASE_GO_PLUS:     return "GO+5";
         case PHASE_GO_MINUS:    return "GO-5";
@@ -735,14 +760,11 @@ static const char *motor_status_text(void)
     return tmc2208_is_moving() ? "MOVE" : "IDLE";
 }
 
-static void oled_show_balance_setup(uint32_t time_ms)
+static void oled_show_zero_setup(uint32_t time_ms)
 {
     char text[16];
     uint32_t age_ms = time_ms - g_last_data_ms;
-    float from_motor_mm =
-        (float)tmc2208_get_position() / TMC_STEPS_PER_MM;
 
-    from_motor_mm = clampf_local(from_motor_mm, 0.0f, ACTUATOR_TRAVEL_MM);
     SSD1306_ShowString(0, 0, "UART:");
     SSD1306_ShowString(0, 30, uart_status_text(time_ms));
     SSD1306_ShowString(0, 60, "A:");
@@ -756,46 +778,24 @@ static void oled_show_balance_setup(uint32_t time_ms)
     }
     SSD1306_ShowString(0, 90, "ms");
 
-    if (g_phase == PHASE_WAIT_BALANCE) {
-        SSD1306_ShowString(1, 0, "DOWN TEST 5.0MM");
-        SSD1306_ShowString(2, 0, "KEY:PB21 M:OFF");
-        SSD1306_ShowString(3, 0, "PRESS PB21 TO DOWN");
-        SSD1306_ShowString(4, 0, "Rx:");
-        SSD1306_ShowNum(4, 18, (int32_t)g_accepted_frames, 5);
-        SSD1306_ShowString(4, 54, "Rj:");
-        SSD1306_ShowNum(4, 72, (int32_t)g_rejected_frames, 3);
-        SSD1306_ShowString(5, 0, "P:");
-        fmt_snum(g_ball_cm, 2, 2, text);
-        SSD1306_ShowString(5, 12, text);
-        SSD1306_ShowString(5, 54, "V:");
-        fmt_snum(g_ball_vel_cm_s, 1, 3, text);
-        SSD1306_ShowString(5, 66, text);
-        SSD1306_ShowString(6, 0, "START:67 TARGET:62");
-        SSD1306_ShowString(7, 0, "VISION PID:DISABLED");
-    } else if (g_phase == PHASE_TEST_MOVE) {
-        SSD1306_ShowString(1, 0, "LOWERING TO 62.0MM");
-        SSD1306_ShowString(2, 0, "MOTOR:");
-        SSD1306_ShowString(2, 36, motor_status_text());
-        SSD1306_ShowString(3, 0, "POS:");
-        fmt_unum(from_motor_mm, 1, 2, text);
-        SSD1306_ShowString(3, 24, text);
-        SSD1306_ShowString(3, 54, "mm");
-        SSD1306_ShowString(4, 0, "TARGET:62.0mm");
-        SSD1306_ShowString(5, 0, "Rx:");
-        SSD1306_ShowNum(5, 18, (int32_t)g_accepted_frames, 5);
-        SSD1306_ShowString(5, 54, "Rj:");
-        SSD1306_ShowNum(5, 72, (int32_t)g_rejected_frames, 3);
-        SSD1306_ShowString(6, 0, "WAIT UNTIL READY");
-        SSD1306_ShowString(7, 0, "DO NOT MOVE PIPE");
-    } else {
-        SSD1306_ShowString(1, 0, "DOWN TEST COMPLETE");
-        SSD1306_ShowString(2, 0, "MOTOR:IDLE HOLD:ON");
-        SSD1306_ShowString(3, 0, "POS:62.0mm");
-        SSD1306_ShowString(4, 0, "MOVED DOWN:5.0mm");
-        SSD1306_ShowString(5, 0, "PB21:LOCKED");
-        SSD1306_ShowString(6, 0, "VISION PID:DISABLED");
-        SSD1306_ShowString(7, 0, "TEST STEP COMPLETE");
-    }
+    SSD1306_ShowString(1, 0, "SET CURRENT AS ZERO");
+    SSD1306_ShowString(2, 0, "KEY:PB21 MOTOR:OFF");
+    SSD1306_ShowString(3, 0, "PRESS PB21 START PID");
+    SSD1306_ShowString(4, 0, "Rx:");
+    SSD1306_ShowNum(4, 18, (int32_t)g_accepted_frames, 5);
+    SSD1306_ShowString(4, 54, "Rj:");
+    SSD1306_ShowNum(4, 72, (int32_t)g_rejected_frames, 3);
+    SSD1306_ShowString(5, 0, "P:");
+    fmt_snum(g_ball_cm, 2, 2, text);
+    SSD1306_ShowString(5, 12, text);
+    SSD1306_ShowString(5, 54, "V:");
+    fmt_snum(g_ball_vel_cm_s, 1, 3, text);
+    SSD1306_ShowString(5, 66, text);
+    SSD1306_ShowString(6, 0, "RAW:");
+    fmt_unum(g_ball_raw_cm, 2, 2, text);
+    SSD1306_ShowString(6, 24, text);
+    SSD1306_ShowString(6, 60, "O=12.50");
+    SSD1306_ShowString(7, 0, "NO STEP BEFORE KEY");
 }
 
 static void oled_show_status(uint32_t time_ms)
@@ -907,23 +907,21 @@ static void oled_show_parameters(void)
     SSD1306_ShowNum(5, 84, (int32_t)ARRIVAL_DWELL_MS, 3);
     SSD1306_ShowString(5, 102, "ms");
 
-    SSD1306_ShowString(6, 0, "Nut:");
-    fmt_unum(BALANCE_HEIGHT_MM, 1, 2, text);
-    SSD1306_ShowString(6, 24, text);
-    SSD1306_ShowString(6, 54, "mm 800st/mm");
+    SSD1306_ShowString(6, 0, "Vr:");
+    fmt_unum(g_vision_speed_cm_s, 1, 3, text);
+    SSD1306_ShowString(6, 18, text);
+    SSD1306_ShowString(6, 60, "Lim:+-10mm");
 
-    SSD1306_ShowString(7, 0, "KEY:PB21 U:PB0/1");
+    SSD1306_ShowString(7, 0, "Z:PB21 U:PB0/1");
 }
 
 static void oled_update(uint32_t time_ms)
 {
     uint32_t page = (time_ms / OLED_PAGE_PERIOD_MS) & 1U;
 
-    if ((g_phase == PHASE_WAIT_BALANCE) ||
-        (g_phase == PHASE_TEST_MOVE) ||
-        (g_phase == PHASE_TEST_DONE)) {
+    if (g_phase == PHASE_WAIT_ZERO) {
         SSD1306_Clear();
-        oled_show_balance_setup(time_ms);
+        oled_show_zero_setup(time_ms);
         SSD1306_Update();
         return;
     }
@@ -956,15 +954,14 @@ int main(void)
     g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 把当前位置记为 67 mm
-     * -> 等待 PB21 -> 再向下降到 62 mm 并保持。本阶段不进入视觉 PID。
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 把当前位置清零
+     * -> 使能驱动 -> 等待有效视觉帧 -> 执行 O -> +5 cm -> -5 cm。
      */
     tmc2208_init();
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
     tmc2208_set_accel(STEPPER_ACCEL_SPS2);
-    tmc2208_set_limits_mm(ACTUATOR_MIN_MM, ACTUATOR_MAX_MM);
-    tmc2208_set_current_position(
-        (int32_t)(TEST_START_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f));
+    tmc2208_set_limits_mm(ACTUATOR_REL_MIN_MM, ACTUATOR_REL_MAX_MM);
+    tmc2208_set_current_position(0);
 
     delay_ms(50U);
     SSD1306_Init();

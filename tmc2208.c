@@ -18,8 +18,8 @@
 #define HARD_MAX_ACCEL_SPS2 80000.0f
 /* 实机确认：DIR 高电平时，移动端从丝杆最低点向上运动。 */
 #define TMC_UP_DIRECTION_PIN_LEVEL 1
-#define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_MM * TMC_STEPS_PER_MM))
-#define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_MM * TMC_STEPS_PER_MM))
+#define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_REL_MM * TMC_STEPS_PER_MM))
+#define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_REL_MM * TMC_STEPS_PER_MM))
 
 /* ==================== 内部状态 ==================== */
 static volatile int32_t  s_position  = 0;      /* 当前绝对位置 (步) */
@@ -36,7 +36,7 @@ static const float    s_min_speed = 200.0f;    /* 起步 / 低速兜底 */
 static volatile float s_cur_speed = 0.0f;      /* 当前速度 */
 static volatile bool  s_decel     = false;     /* 已进入减速段 */
 
-/* 软限位使用最低点起算的绝对坐标，默认覆盖 0~100 mm。 */
+/* 软件零点附近的软限位，且永远不能越过上面的驱动层硬限位。 */
 static int32_t s_min_limit = HARD_MIN_LIMIT_STEPS;
 static int32_t s_max_limit = HARD_MAX_LIMIT_STEPS;
 
@@ -130,11 +130,11 @@ void tmc2208_set_limits_mm(float min_mm, float max_mm)
     int32_t min_steps;
     int32_t max_steps;
 
-    if (min_mm < TMC_HARD_MIN_MM) min_mm = TMC_HARD_MIN_MM;
-    if (max_mm > TMC_HARD_MAX_MM) max_mm = TMC_HARD_MAX_MM;
+    if (min_mm < TMC_HARD_MIN_REL_MM) min_mm = TMC_HARD_MIN_REL_MM;
+    if (max_mm > TMC_HARD_MAX_REL_MM) max_mm = TMC_HARD_MAX_REL_MM;
     if (min_mm >= max_mm) {
-        min_mm = TMC_HARD_MIN_MM;
-        max_mm = TMC_HARD_MAX_MM;
+        min_mm = TMC_HARD_MIN_REL_MM;
+        max_mm = TMC_HARD_MAX_REL_MM;
     }
 
     min_steps = (int32_t)(min_mm * TMC_STEPS_PER_MM);
@@ -177,7 +177,7 @@ bool tmc2208_is_enabled(void)
 void tmc2208_move_to(int32_t target)
 {
     /*
-     * 执行器入口硬限幅：先限制到 100 mm 物理行程，再限制到应用软限位，
+     * 执行器入口硬限幅：先限制到零点附近 ±10 mm，再限制到应用软限位，
      * 全部在启动 STEP 寄存器之前完成。
      */
     if (target < HARD_MIN_LIMIT_STEPS) target = HARD_MIN_LIMIT_STEPS;

@@ -28,15 +28,19 @@
 #define TMC_STEPS_PER_REV         ((uint32_t)(TMC_MOTOR_STEPS_PER_REV * TMC_MICROSTEPS))  /* 1600 */
 #define TMC_STEPS_PER_MM          ((float)TMC_STEPS_PER_REV / TMC_LEAD_MM)                 /* 800 */
 
-/* 物理绝对坐标：丝杆最低点为 0 mm，向上为正，最高点为 100 mm。 */
-#define TMC_HARD_MIN_MM           0.0f
-#define TMC_HARD_MAX_MM           100.0f
-#define TMC_TRAVEL_MM             (TMC_HARD_MAX_MM - TMC_HARD_MIN_MM)
+/*
+ * PB21 按下时把当前位置记为软件零点。第三问只需要零点附近的小角度调节，
+ * 因此驱动层再设置 ±10 mm 的不可越过硬限位；PID 层会进一步限制到 ±6 mm。
+ * 正坐标为移动端物理上升，负坐标为移动端物理下降。
+ */
+#define TMC_PHYSICAL_TRAVEL_MM    100.0f
+#define TMC_HARD_MIN_REL_MM      (-10.0f)
+#define TMC_HARD_MAX_REL_MM        10.0f
 
 /* ============ 运动参数 ============ */
 void  tmc2208_set_max_speed(float steps_per_s);   /* 最大步进速度 (步/s) */
 void  tmc2208_set_accel(float steps_per_s2);      /* 加速度 (步/s^2) */
-void  tmc2208_set_limits_mm(float min_mm, float max_mm); /* 最低点起算的绝对软限位 */
+void  tmc2208_set_limits_mm(float min_mm, float max_mm); /* 相对当前软件零点的软限位 */
 void  tmc2208_set_current_position(int32_t steps);/* 把当前位置标定为某值 (清零用) */
 
 /* ============ 基本控制 ============ */
