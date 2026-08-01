@@ -20,8 +20,6 @@
 #define BANK_2                  (0x20U)
 #define GYRO_RANGE_DPS          (250.0f)
 #define GYRO_CAL_SAMPLES        ICM20948_CALIBRATION_SAMPLES
-#define CAL_STILL_GYRO_DPS      (12.0f)
-#define CAL_STILL_ACCEL_ERR     (1.2f)
 #define YAW_LPF_TAU_S           (0.030f)
 #define YAW_ZERO_RATE_DPS       (0.35f)
 #define STATIONARY_GYRO_DPS     (1.5f)
@@ -425,24 +423,14 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
 
     if (next.calibrated == 0U) {
         /*
-         * Calibrate only from a continuous stationary window.  The generous
-         * raw-rate limit accepts normal factory bias but rejects a vehicle
-         * being carried or turned while the zero offset is being measured.
+         * Average 100 already range-checked frames. Do not reset progress on
+         * vibration: that can leave a real vehicle stuck in CAL forever.
+         * The operator only needs to leave the car still for about two seconds.
          */
-        if (fabsf(raw_gx) <= CAL_STILL_GYRO_DPS &&
-            fabsf(raw_gy) <= CAL_STILL_GYRO_DPS &&
-            fabsf(raw_gz) <= CAL_STILL_GYRO_DPS &&
-            fabsf(accel_magnitude - 9.80665f) <= CAL_STILL_ACCEL_ERR) {
-            g_cal_sum_x += raw_gx;
-            g_cal_sum_y += raw_gy;
-            g_cal_sum_z += raw_gz;
-            next.calibration_samples++;
-        } else {
-            g_cal_sum_x = 0.0f;
-            g_cal_sum_y = 0.0f;
-            g_cal_sum_z = 0.0f;
-            next.calibration_samples = 0U;
-        }
+        g_cal_sum_x += raw_gx;
+        g_cal_sum_y += raw_gy;
+        g_cal_sum_z += raw_gz;
+        next.calibration_samples++;
         if (next.calibration_samples >= GYRO_CAL_SAMPLES) {
             next.gyro_bias_x =
                 g_cal_sum_x / (float) GYRO_CAL_SAMPLES;

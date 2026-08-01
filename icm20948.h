@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define ICM20948_CALIBRATION_SAMPLES (150U)
+#define ICM20948_CALIBRATION_SAMPLES (100U)
 
 typedef struct {
     float ax;
