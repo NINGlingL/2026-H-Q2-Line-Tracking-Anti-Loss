@@ -12,8 +12,9 @@
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
  * 平衡位置设置:
- *   上电后电机保持禁用；按下 PB21，把机构当前位置记录为步进电机软件零点，
- *   随即使能闭环，不产生预置移动。
+ *   实机最终标定位置为距丝杆最低端 62.0 mm。由于无绝对位置传感器，上电时
+ *   机构必须仍在该标定点；固件将当前位置作为平衡基准并立即保持。
+ *   PB21 只用于开始第三问 PID，不再修改步进电机零点。
  */
 
 #include "ti_msp_dl_config.h"
@@ -50,6 +51,7 @@
 #define TASK_TIMEOUT_MS               5000U
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
+#define BALANCE_HEIGHT_MM             62.0f
 #define ACTUATOR_REL_MIN_MM          (-10.0f)
 #define ACTUATOR_REL_MAX_MM            10.0f
 
@@ -439,7 +441,7 @@ static bool pid_update(float error_cm, float ball_velocity_cm_s, float dt_s, flo
 
 /* ==================== 第三问状态机 ==================== */
 typedef enum {
-    PHASE_WAIT_ZERO = 0,
+    PHASE_READY = 0,
     PHASE_WAIT_VISION,
     PHASE_GO_PLUS,
     PHASE_GO_MINUS,
@@ -458,7 +460,7 @@ typedef enum {
     FAULT_PID_NUMERIC
 } FaultCode;
 
-static ControlPhase g_phase = PHASE_WAIT_ZERO;
+static ControlPhase g_phase = PHASE_READY;
 static FaultCode g_fault = FAULT_NONE;
 static uint32_t g_phase_start_ms = 0U;
 static uint32_t g_task_start_ms = 0U;
@@ -476,16 +478,14 @@ static void enter_safe(FaultCode fault)
     g_phase_start_ms = now_ms();
 }
 
-static void record_zero_and_arm(uint32_t time_ms)
+static void request_pid_start(uint32_t time_ms)
 {
     /*
-     * 用户已把机构调到当前平衡位置。PB21 不产生任何 STEP 脉冲，
-     * 只停止定时器、把当前位置记为 0，并在 ±10 mm 安全范围内使能闭环。
+     * 电机已在上电阶段接管 62 mm 平衡位。PB21 只清除控制器历史量并
+     * 请求开始第三问；若视觉尚未就绪，则保持水平并等待有效帧。
      */
     tmc2208_stop();
-    tmc2208_set_current_position(0);
-    tmc2208_set_limits_mm(ACTUATOR_REL_MIN_MM, ACTUATOR_REL_MAX_MM);
-    tmc2208_enable();
+    tmc2208_move_to(0);
     pid_reset();
     g_target_cm = BALL_CENTER_CM;
     g_error_cm = 0.0f;
@@ -494,7 +494,7 @@ static void record_zero_and_arm(uint32_t time_ms)
     g_phase_start_ms = time_ms;
 }
 
-static void service_balance_button(uint32_t time_ms)
+static void service_start_button(uint32_t time_ms)
 {
     uint8_t raw = (DL_GPIO_readPins(KEY_PORT, KEY_START_PIN) == 0U) ? 0U : 1U;
 
@@ -505,8 +505,8 @@ static void service_balance_button(uint32_t time_ms)
     if (((time_ms - g_button_change_ms) >= BUTTON_DEBOUNCE_MS) &&
         (raw != g_button_stable)) {
         g_button_stable = raw;
-        if ((raw == 0U) && (g_phase == PHASE_WAIT_ZERO)) {
-            record_zero_and_arm(time_ms);
+        if ((raw == 0U) && (g_phase == PHASE_READY)) {
+            request_pid_start(time_ms);
         }
     }
 }
@@ -530,7 +530,7 @@ static bool target_is_settled(uint32_t time_ms)
 static bool trajectory_update(uint32_t time_ms)
 {
     switch (g_phase) {
-        case PHASE_WAIT_ZERO:
+        case PHASE_READY:
             if ((time_ms - g_phase_start_ms) > WAIT_BUTTON_TIMEOUT_MS) {
                 enter_safe(FAULT_BUTTON_TIMEOUT);
             }
@@ -645,7 +645,7 @@ static void control_supervise(void)
         return;
     }
 
-    if ((g_phase == PHASE_WAIT_ZERO) ||
+    if ((g_phase == PHASE_READY) ||
         (g_phase == PHASE_WAIT_VISION)) {
         (void)trajectory_update(time_ms);
     } else if ((g_phase == PHASE_GO_PLUS) &&
@@ -746,7 +746,7 @@ static void fmt_unum(float value, int decimals, int max_integer_digits, char *bu
 static const char *phase_text(void)
 {
     switch (g_phase) {
-        case PHASE_WAIT_ZERO:   return "ZERO";
+        case PHASE_READY:       return "READY";
         case PHASE_WAIT_VISION: return "WAIT";
         case PHASE_GO_PLUS:     return "GO+5";
         case PHASE_GO_MINUS:    return "GO-5";
@@ -781,7 +781,7 @@ static const char *motor_status_text(void)
     return tmc2208_is_moving() ? "MOVE" : "IDLE";
 }
 
-static void oled_show_zero_setup(uint32_t time_ms)
+static void oled_show_ready(uint32_t time_ms)
 {
     char text[16];
     uint32_t age_ms = time_ms - g_last_data_ms;
@@ -799,8 +799,8 @@ static void oled_show_zero_setup(uint32_t time_ms)
     }
     SSD1306_ShowString(0, 90, "ms");
 
-    SSD1306_ShowString(1, 0, "SET CURRENT AS ZERO");
-    SSD1306_ShowString(2, 0, "KEY:PB21 MOTOR:OFF");
+    SSD1306_ShowString(1, 0, "BALANCE:62.0MM HOLD");
+    SSD1306_ShowString(2, 0, "M:IDLE Ph:READY");
     SSD1306_ShowString(3, 0, "PRESS PB21 START PID");
     SSD1306_ShowString(4, 0, "By:");
     SSD1306_ShowNum(4, 18, (int32_t)g_uart_rx_bytes, 5);
@@ -818,7 +818,7 @@ static void oled_show_zero_setup(uint32_t time_ms)
     SSD1306_ShowString(6, 60, "V:");
     fmt_snum(g_ball_vel_cm_s, 1, 3, text);
     SSD1306_ShowString(6, 72, text);
-    SSD1306_ShowString(7, 0, "NO STEP BEFORE KEY");
+    SSD1306_ShowString(7, 0, "PB21 ONLY STARTS PID");
 }
 
 static void oled_show_status(uint32_t time_ms)
@@ -945,9 +945,9 @@ static void oled_update(uint32_t time_ms)
 {
     uint32_t page = (time_ms / OLED_PAGE_PERIOD_MS) & 1U;
 
-    if (g_phase == PHASE_WAIT_ZERO) {
+    if (g_phase == PHASE_READY) {
         SSD1306_Clear();
-        oled_show_zero_setup(time_ms);
+        oled_show_ready(time_ms);
         SSD1306_Update();
         return;
     }
@@ -980,8 +980,9 @@ int main(void)
     g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 等待 PB21 -> 把当前位置清零
-     * -> 使能驱动 -> 等待有效视觉帧 -> 执行 O -> +5 cm -> -5 cm。
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 将当前已标定机械位置接管为
+     * 62 mm 平衡基准（相对坐标 0）-> 使能保持 -> 等待 PB21 启动 PID。
+     * 无绝对位置传感器，因此上电前不得手动改变已标定机械位置。
      */
     tmc2208_init();
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
@@ -991,6 +992,8 @@ int main(void)
 
     delay_ms(50U);
     SSD1306_Init();
+    tmc2208_enable();
+    tmc2208_move_to(0);
     oled_update(now_ms());
     g_oled_refresh_count++;
     g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
@@ -1002,7 +1005,7 @@ int main(void)
         uint32_t time_ms;
 
         time_ms = now_ms();
-        service_balance_button(time_ms);
+        service_start_button(time_ms);
         process_uart();
         if (g_ball_new) {
             g_ball_new = false;

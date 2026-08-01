@@ -10,10 +10,12 @@ static uint8_t OLED_Buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
 static bool s_oled_healthy = true;
 static uint8_t s_oled_address = SSD1306_I2C_ADDR;
 static uint8_t s_next_page = 0U;
+static uint8_t s_recovery_wait = 0U;
 
 #define OLED_I2C_TIMEOUT_LOOPS   ((CPUCLK_FREQ / 1000UL) * 10UL)
 #define OLED_I2C_HALF_PERIOD     (CPUCLK_FREQ / 200000UL)
-#define OLED_PAGES_PER_UPDATE    3U
+#define OLED_PAGES_PER_UPDATE    1U
+#define OLED_RECOVERY_BACKOFF_UPDATES 10U
 
 /* ========== 6x8 ASCII 字库 (字符 0x20 ~ 0x7E) ========== */
 static const uint8_t Font6x8[][6] = {
@@ -272,7 +274,7 @@ static bool write_page(uint8_t page)
     return true;
 }
 
-static void recover_i2c_bus(void)
+static bool recover_i2c_bus(void)
 {
     uint8_t pulse;
 
@@ -280,10 +282,16 @@ static void recover_i2c_bus(void)
     for (pulse = 0U; pulse < 9U; pulse++) {
         scl_low();
         i2c_delay();
-        (void)wait_scl_high();
+        if (!wait_scl_high()) {
+            /* SCL 被硬件持续拉低时立即退出，不能累计等待 9 个超时。 */
+            scl_low();
+            i2c_stop();
+            return false;
+        }
         i2c_delay();
     }
     i2c_stop();
+    return true;
 }
 
 /* ========== 基本操作 ========== */
@@ -302,8 +310,9 @@ void SSD1306_Init(void)
     uint8_t page;
 
     configure_gpio_i2c();
-    recover_i2c_bus();
+    (void)recover_i2c_bus();
     s_next_page = 0U;
+    s_recovery_wait = 0U;
 
     /* 与“电赛备用2”实机驱动一致：100 kHz 软件 I2C + page addressing。 */
     delay_cycles(CPUCLK_FREQ / 10U);
@@ -350,8 +359,24 @@ void SSD1306_Update(void)
 {
     uint8_t count;
 
-    for (count = 0U; (count < OLED_PAGES_PER_UPDATE) && s_oled_healthy;
-         count++) {
+    /*
+     * 一次只发送一页，避免 OLED 刷新长时间占住 20 Hz PID 主循环。
+     * 瞬态 NACK/拉低总线后不永久冻结显示：约每 1 s 做一次有界总线恢复。
+     */
+    if (!s_oled_healthy) {
+        s_recovery_wait++;
+        if (s_recovery_wait < OLED_RECOVERY_BACKOFF_UPDATES) {
+            return;
+        }
+        s_recovery_wait = 0U;
+        configure_gpio_i2c();
+        if (!recover_i2c_bus()) {
+            return;
+        }
+        s_oled_healthy = true;
+    }
+
+    for (count = 0U; count < OLED_PAGES_PER_UPDATE; count++) {
         if (!write_page(s_next_page)) {
             return;
         }
