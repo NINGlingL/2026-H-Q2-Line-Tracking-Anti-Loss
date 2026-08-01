@@ -16,6 +16,7 @@
 #define STEP_CLK_HZ        STEP_INST_CLK_FREQ /* 32 MHz BUSCLK / 8 = 4 MHz */
 #define HARD_MAX_SPEED_SPS 12000.0f
 #define HARD_MAX_ACCEL_SPS2 80000.0f
+#define TMC_DIRECTION_INVERTED 1
 #define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_REL_MM * TMC_STEPS_PER_MM))
 #define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_REL_MM * TMC_STEPS_PER_MM))
 
@@ -72,13 +73,30 @@ static void stop_stepping(void)
     s_moving = false;
 }
 
+static void set_direction_pin(int8_t direction)
+{
+#if TMC_DIRECTION_INVERTED
+    if (direction > 0) {
+        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    } else {
+        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    }
+#else
+    if (direction > 0) {
+        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    } else {
+        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    }
+#endif
+}
+
 /* ==================== API ==================== */
 
 void tmc2208_init(void)
 {
     /* DIR/EN 已由 SysConfig 配置为输出; 这里设成安全默认: 禁用驱动 */
     DL_GPIO_setPins(TMC2208_PORT, TMC2208_EN_PIN);    /* EN 高 = 禁用 */
-    DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);   /* 方向给一个默认值 */
+    set_direction_pin(1);                            /* 校准后的正方向：远离电机端 */
 
     stop_stepping();
     s_enabled  = false;
@@ -205,11 +223,7 @@ void tmc2208_move_to(int32_t target)
         s_decel     = false;
         s_cur_speed = s_min_speed;
 
-        if (s_dir > 0) {
-            DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
-        } else {
-            DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
-        }
+        set_direction_pin(s_dir);
         start_stepping((uint32_t)((float)STEP_CLK_HZ / s_min_speed));
         return;
     }
@@ -227,11 +241,7 @@ void tmc2208_move_to(int32_t target)
     s_cur_speed = s_min_speed;
 
     /* 先定方向, 再开始发脉冲 */
-    if (s_dir > 0) {
-        DL_GPIO_setPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    } else {
-        DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
-    }
+    set_direction_pin(s_dir);
 
     uint32_t interval = (uint32_t)((float)STEP_CLK_HZ / s_min_speed);
     start_stepping(interval);
