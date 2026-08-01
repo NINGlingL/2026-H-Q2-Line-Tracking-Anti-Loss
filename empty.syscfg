@@ -18,6 +18,8 @@ const PWM1   = PWM.addInstance();
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
 const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
 const UART1  = UART.addInstance();
+const WWDT   = scripting.addModule("/ti/driverlib/WWDT", {}, false);
+const WWDT1  = WWDT.addInstance();
 
 /**
  * Write custom configuration values to the imported modules.
@@ -29,6 +31,7 @@ GPIO1.associatedPins[0].$name       = "DIR";
 GPIO1.associatedPins[0].pin.$assign = "PA13";
 GPIO1.associatedPins[1].$name       = "EN";
 GPIO1.associatedPins[1].pin.$assign = "PA15";
+GPIO1.associatedPins[1].initialValue = "SET";
 
 const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
 
@@ -39,7 +42,7 @@ I2C1.sdaPinConfig.$name              = "ti_driverlib_gpio_GPIOPinGeneric2";
 I2C1.sclPinConfig.$name              = "ti_driverlib_gpio_GPIOPinGeneric3";
 
 PWM1.clockDivider                       = 8;
-PWM1.timerStartTimer                    = true;
+PWM1.timerStartTimer                    = false;
 PWM1.ccIndex                            = [0];
 PWM1.$name                              = "STEP";
 PWM1.peripheral.$assign                 = "TIMA0";
@@ -63,6 +66,13 @@ UART1.peripheral.txPin.$assign = "PB0";
 UART1.txPinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric0";
 UART1.rxPinConfig.$name        = "ti_driverlib_gpio_GPIOPinGeneric1";
 
+/* LFCLK window watchdog: window 0 has no closed period, main loop may feed safely. */
+WWDT1.$name               = "WWDT0";
+WWDT1.clockDivider        = "2";
+WWDT1.periodCount         = "15";
+WWDT1.sleepMode           = true;
+WWDT1.window0ClosedPeriod = "0";
+
 /**
  * Pinmux solution for unlocked pins/peripherals. This ensures that minor changes to the automatic solver in a future
  * version of the tool will not impact the pinmux you originally saw.  These lines can be completely deleted in order to
@@ -75,3 +85,4 @@ I2C1.peripheral.$suggestSolution           = "I2C0";
 I2C1.peripheral.sdaPin.$suggestSolution    = "PA0";
 I2C1.peripheral.sclPin.$suggestSolution    = "PA1";
 SYSCTL.peripheral.$suggestSolution         = "SYSCTL";
+WWDT1.peripheral.$suggestSolution          = "WWDT0";

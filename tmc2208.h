@@ -3,8 +3,9 @@
  *
  * 硬件:
  *   STEP : PA8  (TIMA0_CCP0, PWM 输出, 4MHz 定时器时钟)
- *   DIR  : PA13 (GPIO)
- *   EN   : PA15 (GPIO, 低有效)
+ *   DIR  : PA13 (GPIO；本芯片调试口为 PA19/PA20，未复用)
+ *   EN   : PA15 (GPIO, 低有效；ENN 本身无内部上拉，需外接 10k~20k 上拉到 VIO，
+ *                  若所用模块板已带上拉则不要重复安装)
  *   MS1/MS2 接 GND -> 1/8 细分
  *
  * 电机 28HS30-0604A-013 (丝杆型):
@@ -27,9 +28,16 @@
 #define TMC_STEPS_PER_REV         ((uint32_t)(TMC_MOTOR_STEPS_PER_REV * TMC_MICROSTEPS))  /* 1600 */
 #define TMC_STEPS_PER_MM          ((float)TMC_STEPS_PER_REV / TMC_LEAD_MM)                 /* 800 */
 
+/* 100 mm 行程，水平点距电机端 65 mm；软件坐标以水平点为 0。 */
+#define TMC_NEUTRAL_FROM_MOTOR_MM 65.0f
+#define TMC_TRAVEL_MM             100.0f
+#define TMC_HARD_MIN_REL_MM      (-TMC_NEUTRAL_FROM_MOTOR_MM)
+#define TMC_HARD_MAX_REL_MM       (TMC_TRAVEL_MM - TMC_NEUTRAL_FROM_MOTOR_MM)
+
 /* ============ 运动参数 ============ */
 void  tmc2208_set_max_speed(float steps_per_s);   /* 最大步进速度 (步/s) */
 void  tmc2208_set_accel(float steps_per_s2);      /* 加速度 (步/s^2) */
+void  tmc2208_set_limits_mm(float min_mm, float max_mm); /* 相对水平点软限位 */
 void  tmc2208_set_current_position(int32_t steps);/* 把当前位置标定为某值 (清零用) */
 
 /* ============ 基本控制 ============ */

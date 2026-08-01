@@ -138,6 +138,12 @@ extern "C" {
 #define TMC2208_EN_PIN                                          (DL_GPIO_PIN_15)
 #define TMC2208_EN_IOMUX                                         (IOMUX_PINCM37)
 
+
+/* Defines for WWDT */
+#define WWDT0_INST                                                       (WWDT0)
+#define WWDT0_INT_IRQN                                          (WWDT0_INT_IRQn)
+
+
 /* clang-format on */
 
 void SYSCFG_DL_init(void);
@@ -148,6 +154,7 @@ void SYSCFG_DL_STEP_init(void);
 void SYSCFG_DL_I2C_0_init(void);
 void SYSCFG_DL_UART_0_init(void);
 
+void SYSCFG_DL_WWDT0_init(void);
 
 bool SYSCFG_DL_saveConfiguration(void);
 bool SYSCFG_DL_restoreConfiguration(void);

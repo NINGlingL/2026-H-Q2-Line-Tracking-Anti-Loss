@@ -55,6 +55,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     SYSCFG_DL_STEP_init();
     SYSCFG_DL_I2C_0_init();
     SYSCFG_DL_UART_0_init();
+    SYSCFG_DL_WWDT0_init();
     /* Ensure backup structures have no valid state */
 	gSTEPBackup.backupRdy 	= false;
 
@@ -90,12 +91,14 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerA_reset(STEP_INST);
     DL_I2C_reset(I2C_0_INST);
     DL_UART_Main_reset(UART_0_INST);
+    DL_WWDT_reset(WWDT0_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_TimerA_enablePower(STEP_INST);
     DL_I2C_enablePower(I2C_0_INST);
     DL_UART_Main_enablePower(UART_0_INST);
+    DL_WWDT_enablePower(WWDT0_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
 
@@ -125,8 +128,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 
     DL_GPIO_initDigitalOutput(TMC2208_EN_IOMUX);
 
-    DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN |
-		TMC2208_EN_PIN);
+    DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
+    DL_GPIO_setPins(TMC2208_PORT, TMC2208_EN_PIN);
     DL_GPIO_enableOutput(TMC2208_PORT, TMC2208_DIR_PIN |
 		TMC2208_EN_PIN);
 
@@ -164,7 +167,7 @@ static const DL_TimerA_PWMConfig gSTEPConfig = {
     .pwmMode = DL_TIMER_PWM_MODE_EDGE_ALIGN,
     .period = 1000,
     .isTimerWithFourCC = true,
-    .startTimer = DL_TIMER_START,
+    .startTimer = DL_TIMER_STOP,
 };
 
 SYSCONFIG_WEAK void SYSCFG_DL_STEP_init(void) {
@@ -255,5 +258,27 @@ SYSCONFIG_WEAK void SYSCFG_DL_UART_0_init(void)
 
 
     DL_UART_Main_enable(UART_0_INST);
+}
+
+SYSCONFIG_WEAK void SYSCFG_DL_WWDT0_init(void)
+{
+    /*
+     * Initialize WWDT0 in Watchdog mode with following settings
+     *   Watchdog Source Clock = (LFCLK Freq) / (WWDT Clock Divider)
+     *                         = 32768Hz / 2 = 16.38 kHz
+     *   Watchdog Period       = (WWDT Clock Divider) ∗ (WWDT Period Count) / 32768Hz
+     *                         = 2 * 2^15 / 32768Hz = 2.00 s
+     *   Window0 Closed Period = (WWDT Period) * (Window0 Closed Percent)
+     *                         = 2.00 s * 0% = 0.00 s
+     *   Window1 Closed Period = (WWDT Period) * (Window1 Closed Percent)
+     *                         = 2.00 s * 0% = 0.00 s
+     */
+    DL_WWDT_initWatchdogMode(WWDT0_INST, DL_WWDT_CLOCK_DIVIDE_2,
+        DL_WWDT_TIMER_PERIOD_15_BITS, DL_WWDT_RUN_IN_SLEEP,
+        DL_WWDT_WINDOW_PERIOD_0, DL_WWDT_WINDOW_PERIOD_0);
+
+    /* Set Window0 as active window */
+    DL_WWDT_setActiveWindow(WWDT0_INST, DL_WWDT_WINDOW0);
+
 }
 

@@ -1,71 +1,135 @@
-  /*
- * 车载平衡滚球运动控制系统 — 第三问: 摆杆控球 PID
+/*
+ * 车载平衡滚球运动控制系统 - 第三问
  *
- * 功能:
- *   1. 串口接收视觉数据 (P:位置cm, V:速度cm/s, 20Hz)
- *   2. 球位置 PD(PID) -> 杆端抬升量(mm) -> 步进电机目标位置
- *   3. 任务3轨迹: O -> O+5 -> O-5, 误差<=1cm, 总时间<=5s
- *   4. OLED 显示: 球位/目标/误差/速度/抬升量/步数/阶段
+ * MaixCAM Pro -> UART0:
+ *   P:<position_cm>,V:<signed_velocity_cm_s>\n, 115200 8N1, 20 Hz
+ *   按本工程 SysConfig 接线：Maix TX -> MSPM0 PB1(RX)，Maix RX -> PB0(TX)。
  *
- * 机械约定 (请按实际标定核对):
- *   - 视觉 0cm = 电机端, 25cm = 铰链端
- *   - 抬升电机端 -> 球滚向 +cm 方向
- *   - 水管水平 (丝杆螺母距电机 6.5cm) = 步进位置 0; 上电前把水管调到水平
- *   - 800 步/mm (1/8 细分, 2mm 丝杆)
+ * 第三问轨迹:
+ *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
+ *
+ * 机械零点:
+ *   100 mm 丝杆上，移动端距电机端 65 mm 时水管水平。由于当前硬件没有
+ *   原点开关，上电前必须手动放到 65 mm 位置；软件把该点记为相对 0 mm。
  */
 
 #include "ti_msp_dl_config.h"
 #include "ssd1306.h"
 #include "tmc2208.h"
+#include <math.h>
 #include <string.h>
 
-/* ==================== 控制配置 (按实测调整) ==================== */
-#define BALL_CENTER_CM    12.5f     /* 摆杆中心 O 在视觉坐标的 cm 值 */
-#define BALL_STEP_CM      5.0f      /* 任务3 ±5cm */
-#define BALL_HOLD_TOL_CM  0.5f      /* 到达目标判定容差 */
-#define SEG_TIMEOUT_MS    2500      /* 每段超时强制切换 (防卡死) */
+/* ==================== 已知接口与机械参数 ==================== */
+#define UART_BAUDRATE_BPS             115200U
+#define VISION_PERIOD_MS              50U
+#define VISION_TIMEOUT_MS             250U
+#define WAIT_VISION_TIMEOUT_MS        10000U
 
-/* PID (输出 = 杆端抬升量 mm) */
-#define PID_KP            3.0f      /* mm / cm 位置误差 */
-#define PID_KD            1.8f      /* mm / (cm/s) 速度阻尼 */
-#define PID_KI            0.3f      /* mm / (cm*s) 积分 */
-#define LIFT_LIMIT_MM     12.0f     /* 抬升量输出限幅 ±mm */
+#define BALL_CENTER_CM                0.0f
+#define BALL_STEP_CM                  5.0f
+#define BALL_POSITION_MIN_CM         -13.5f
+#define BALL_POSITION_MAX_CM          13.5f
+#define BALL_SPEED_LIMIT_CM_S         150.0f
+#define BALL_JUMP_BASE_CM             2.0f
+#define BALL_JUMP_SPEED_FACTOR        1.8f
 
-/* 电机 */
-#define LIFT_SIGN         1         /* 步数增=抬升=球滚向+cm; 方向反则改 -1 */
-#define STEPPER_MAX_SPEED 10000.0f  /* 步/s */
-#define STEPPER_ACCEL     60000.0f  /* 步/s^2 */
+#define ARRIVAL_TOL_CM                0.60f
+#define ARRIVAL_SPEED_CM_S            0.50f
+#define ARRIVAL_DWELL_MS              150U
+#define PLUS_TIMEOUT_MS               2200U
+#define TASK_TIMEOUT_MS               5000U
+#define FINAL_HOLD_TIMEOUT_MS         60000U
 
-/* 测试模式 */
-#define TEST_LOOP         1         /* 1=循环 O±5; 0=单次 O->+5->-5 */
+#define NEUTRAL_FROM_MOTOR_MM         65.0f
+#define ACTUATOR_TRAVEL_MM            100.0f
+#define ACTUATOR_REL_MIN_MM          (-NEUTRAL_FROM_MOTOR_MM)
+#define ACTUATOR_REL_MAX_MM           (ACTUATOR_TRAVEL_MM - NEUTRAL_FROM_MOTOR_MM)
 
-/* 数据超时 */
-#define DATA_TIMEOUT_MS   500
+/*
+ * PID 输出为控制端相对水平位置的位移量。
+ * 图 2 中铰链在左、控制端在右：控制端抬高会使球向负坐标滚动。
+ * 若实机“正步数”实际让控制端下降，把此值改为 +1。
+ */
+#define MOTOR_POSITIVE_LIFTS_END      1
+#if MOTOR_POSITIVE_LIFTS_END
+#define CONTROL_TO_MOTOR_SIGN        (-1.0f)
+#else
+#define CONTROL_TO_MOTOR_SIGN         (1.0f)
+#endif
 
-/* ==================== 毫秒时基 (SysTick) ==================== */
-static volatile uint32_t g_ms = 0;
+/*
+ * 首次上机参数。视觉端发出的速度带 VELOCITY_SCALE=0.3，因此 Kd 已按该比例
+ * 补偿；实机仍应先悬空/低幅验证方向，再根据轨迹记录微调。
+ */
+#define PID_KP_MM_PER_CM              1.20f
+#define PID_KI_MM_PER_CM_S            0.04f
+#define PID_KD_MM_PER_CM_S            2.60f
+#define PID_INTEGRAL_ZONE_CM          2.50f
+#define PID_INTEGRAL_LIMIT_CM_S       8.00f
+#define PID_OUTPUT_LIMIT_MM           6.00f
+#define PID_OUTPUT_SLEW_MM_S          18.0f
 
-void SysTick_Handler(void) { g_ms++; }
-static inline uint32_t now_ms(void) { return g_ms; }
+#define STEPPER_MAX_SPEED_SPS         5000.0f
+#define STEPPER_ACCEL_SPS2            24000.0f
+
+#if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
+#error "UART baud rate must match MaixCAM protocol (115200 bps)"
+#endif
+
+/* ==================== 毫秒时基 ==================== */
+static volatile uint32_t g_ms = 0U;
+
+void SysTick_Handler(void)
+{
+    g_ms++;
+}
+
+static uint32_t now_ms(void)
+{
+    return g_ms;
+}
 
 static void delay_ms(uint32_t ms)
 {
-    uint32_t cycles = CPUCLK_FREQ / 1000 * ms / 3;
-    while (cycles--) { __NOP(); }
+    uint32_t cycles = (CPUCLK_FREQ / 3000U) * ms;
+    while (cycles-- > 0U) {
+        __NOP();
+    }
 }
 
-/* ==================== UART0 环形缓冲 + 中断 ==================== */
-#define RX_BUFFER_SIZE 128
-static char              rx_buffer[RX_BUFFER_SIZE];
-static volatile uint16_t rx_head = 0;
-static volatile uint16_t rx_tail = 0;
+static float absf_local(float value)
+{
+    return (value < 0.0f) ? -value : value;
+}
+
+static float clampf_local(float value, float lower, float upper)
+{
+    if (value > upper) {
+        value = upper;
+    }
+    if (value < lower) {
+        value = lower;
+    }
+    return value;
+}
+
+static bool finitef_local(float value)
+{
+    return (isnan(value) == 0) && (isinf(value) == 0);
+}
+
+/* ==================== UART0 环形缓冲 ==================== */
+#define RX_BUFFER_SIZE 128U
+static char rx_buffer[RX_BUFFER_SIZE];
+static volatile uint16_t rx_head = 0U;
+static volatile uint16_t rx_tail = 0U;
 
 void UART0_IRQHandler(void)
 {
-    if (DL_UART_getPendingInterrupt(UART_0_INST) & DL_UART_IIDX_RX) {
+    if (DL_UART_getPendingInterrupt(UART_0_INST) == DL_UART_IIDX_RX) {
         while (DL_UART_isRXFIFOEmpty(UART_0_INST) == false) {
-            char ch = DL_UART_receiveData(UART_0_INST);
-            uint16_t next = (rx_head + 1) % RX_BUFFER_SIZE;
+            char ch = (char)DL_UART_receiveData(UART_0_INST);
+            uint16_t next = (uint16_t)((rx_head + 1U) % RX_BUFFER_SIZE);
             if (next != rx_tail) {
                 rx_buffer[rx_head] = ch;
                 rx_head = next;
@@ -74,331 +138,595 @@ void UART0_IRQHandler(void)
     }
 }
 
-/* ==================== 视觉数据 ==================== */
-#define LINE_BUF_SIZE 32
-static char    line_buf[LINE_BUF_SIZE];
-static uint8_t line_len = 0;
+/* ==================== 视觉帧解析与合理性检查 ==================== */
+#define LINE_BUF_SIZE 40U
+static char line_buf[LINE_BUF_SIZE];
+static uint8_t line_len = 0U;
+static bool line_overflow = false;
 
-static float    g_ball_cm    = BALL_CENTER_CM;   /* 球位置 cm */
-static float    g_ball_vel   = 0.0f;             /* 球速度 cm/s */
-static bool     g_ball_valid = false;            /* 收到过数据 */
-static uint32_t g_last_data_ms = 0;
-static uint8_t  g_ball_new   = 0;                /* 新帧标志 */
+static float g_ball_cm = BALL_CENTER_CM;
+static float g_ball_vel_cm_s = 0.0f;
+static bool g_ball_valid = false;
+static bool g_ball_new = false;
+static uint32_t g_last_data_ms = 0U;
+static uint32_t g_last_sample_ms = 0U;
+static uint16_t g_rejected_frames = 0U;
 
-/* 手写浮点解析, 返回 1 成功 */
-static int parse_float(const char *s, float *out)
+static bool parse_float_token(const char *text, float *value, const char **end)
 {
+    const char *p = text;
     float sign = 1.0f;
-    const char *p = s;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '+')      p++;
-    else if (*p == '-') { sign = -1.0f; p++; }
+    float result = 0.0f;
+    float fraction = 0.1f;
+    uint8_t digits = 0U;
 
-    float value = 0.0f;
-    int   digits = 0;
-    while (*p >= '0' && *p <= '9') {
-        value = value * 10.0f + (float)(*p - '0');
+    if (*p == '+') {
+        p++;
+    } else if (*p == '-') {
+        sign = -1.0f;
+        p++;
+    }
+
+    while ((*p >= '0') && (*p <= '9')) {
+        result = result * 10.0f + (float)(*p - '0');
         digits++;
         p++;
     }
     if (*p == '.') {
         p++;
-        float frac = 0.1f;
-        while (*p >= '0' && *p <= '9') {
-            value += (float)(*p - '0') * frac;
-            frac  *= 0.1f;
+        while ((*p >= '0') && (*p <= '9')) {
+            result += (float)(*p - '0') * fraction;
+            fraction *= 0.1f;
             digits++;
             p++;
         }
     }
-    if (digits == 0) return 0;
-    *out = sign * value;
-    return 1;
+
+    if (digits == 0U) {
+        return false;
+    }
+
+    result *= sign;
+    if (!finitef_local(result)) {
+        return false;
+    }
+    *value = result;
+    *end = p;
+    return true;
 }
 
-/* 逐字符组行, 完整行时解析 "P:xx.xx,V:yy.yy" */
+static bool vision_sample_is_plausible(float position_cm, float velocity_cm_s, uint32_t sample_ms)
+{
+    if ((position_cm < BALL_POSITION_MIN_CM) ||
+        (position_cm > BALL_POSITION_MAX_CM) ||
+        (absf_local(velocity_cm_s) > BALL_SPEED_LIMIT_CM_S)) {
+        return false;
+    }
+
+    if (g_ball_valid) {
+        uint32_t dt_ms = sample_ms - g_last_sample_ms;
+        float dt_s = clampf_local((float)dt_ms * 0.001f, 0.01f, 0.25f);
+        float allowed_jump = BALL_JUMP_BASE_CM +
+                             absf_local(g_ball_vel_cm_s) * dt_s * BALL_JUMP_SPEED_FACTOR;
+        if (absf_local(position_cm - g_ball_cm) > allowed_jump) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool parse_vision_line(const char *line, float *position_cm, float *velocity_cm_s)
+{
+    const char *comma;
+    const char *position_end;
+    const char *velocity_end;
+
+    if (strncmp(line, "P:", 2U) != 0) {
+        return false;
+    }
+    comma = strstr(line + 2, ",V:");
+    if (comma == NULL) {
+        return false;
+    }
+    if (!parse_float_token(line + 2, position_cm, &position_end) ||
+        (position_end != comma)) {
+        return false;
+    }
+    if (!parse_float_token(comma + 3, velocity_cm_s, &velocity_end) ||
+        (*velocity_end != '\0')) {
+        return false;
+    }
+    return true;
+}
+
+static void accept_vision_line(const char *line)
+{
+    float position_cm;
+    float velocity_cm_s;
+    uint32_t sample_ms = now_ms();
+
+    if (parse_vision_line(line, &position_cm, &velocity_cm_s) &&
+        vision_sample_is_plausible(position_cm, velocity_cm_s, sample_ms)) {
+        g_ball_cm = position_cm;
+        g_ball_vel_cm_s = velocity_cm_s;
+        g_last_sample_ms = sample_ms;
+        g_last_data_ms = sample_ms;
+        g_ball_valid = true;
+        g_ball_new = true;
+    } else {
+        if (g_rejected_frames < 65535U) {
+            g_rejected_frames++;
+        }
+    }
+}
+
 static void process_uart(void)
 {
     while (rx_head != rx_tail) {
         char ch = rx_buffer[rx_tail];
-        rx_tail = (rx_tail + 1) % RX_BUFFER_SIZE;
+        rx_tail = (uint16_t)((rx_tail + 1U) % RX_BUFFER_SIZE);
 
-        if (ch == '\n' || ch == '\r') {
-            if (line_len > 0) {
+        if ((ch == '\n') || (ch == '\r')) {
+            if ((line_len > 0U) && !line_overflow) {
                 line_buf[line_len] = '\0';
-
-                float p = 0.0f, v = 0.0f;
-                const char *pp = strstr(line_buf, "P:");
-                const char *vp = strstr(line_buf, "V:");
-                if (pp != NULL && vp != NULL &&
-                    parse_float(pp + 2, &p) && parse_float(vp + 2, &v)) {
-                    g_ball_cm     = p;
-                    g_ball_vel    = v;
-                    g_ball_valid  = true;
-                    g_last_data_ms = now_ms();
-                    g_ball_new    = 1;
-                }
-                line_len = 0;
+                accept_vision_line(line_buf);
             }
-        } else if (line_len < LINE_BUF_SIZE - 1) {
-            line_buf[line_len++] = ch;
+            line_len = 0U;
+            line_overflow = false;
+        } else if (!line_overflow) {
+            if (line_len < (LINE_BUF_SIZE - 1U)) {
+                line_buf[line_len++] = ch;
+            } else {
+                line_overflow = true;
+            }
         }
     }
 }
 
-static int ball_lost(void)
+static bool vision_lost(void)
 {
-    return (!g_ball_valid) || (now_ms() - g_last_data_ms > DATA_TIMEOUT_MS);
+    return (!g_ball_valid) || ((now_ms() - g_last_data_ms) > VISION_TIMEOUT_MS);
 }
 
 /* ==================== PID ==================== */
-static float g_pid_kp = PID_KP, g_pid_ki = PID_KI, g_pid_kd = PID_KD;
-static float g_integral = 0.0f;
-static float g_lift_mm  = 0.0f;   /* PID 输出: 杆端抬升量 mm */
-static float g_err_cm   = 0.0f;
+typedef struct {
+    float kp;
+    float ki;
+    float kd;
+    float integral;
+    float last_output_mm;
+} BallPid;
+
+static BallPid g_pid = {
+    PID_KP_MM_PER_CM,
+    PID_KI_MM_PER_CM_S,
+    PID_KD_MM_PER_CM_S,
+    0.0f,
+    0.0f
+};
+
 static float g_target_cm = BALL_CENTER_CM;
-static float g_last_target_cm = -9999.0f;
+static float g_error_cm = 0.0f;
+static float g_control_mm = 0.0f;
 
-static float pid_update(float err, float ball_vel, float dt)
+static void pid_reset(void)
 {
-    float derr = -ball_vel;                    /* 目标为阶跃常量: d(err)/dt = -球速 */
-
-    g_integral += err * dt;
-    float i_max = LIFT_LIMIT_MM / (g_pid_ki + 0.0001f);   /* 积分限幅 (抗饱和) */
-    if (g_integral >  i_max) g_integral =  i_max;
-    if (g_integral < -i_max) g_integral = -i_max;
-
-    float out = g_pid_kp * err + g_pid_kd * derr + g_pid_ki * g_integral;
-    if (out >  LIFT_LIMIT_MM) out =  LIFT_LIMIT_MM;
-    if (out < -LIFT_LIMIT_MM) out = -LIFT_LIMIT_MM;
-
-    return out;
+    g_pid.integral = 0.0f;
+    g_pid.last_output_mm = 0.0f;
 }
 
-/* ==================== 任务3轨迹状态机 ==================== */
-typedef enum {
-    PHASE_GO_PLUS  = 1,   /* 前往 O+5 */
-    PHASE_GO_MINUS = 2,   /* 前往 O-5 */
-    PHASE_DONE     = 3,
-} Phase;
-
-static Phase    g_phase = PHASE_GO_PLUS;
-static uint32_t g_phase_start_ms = 0;
-static uint32_t g_total_start_ms = 0;
-static int      g_ctrl_started = 0;
-
-static void trajectory_update(float ball_cm, uint32_t t)
+static bool pid_update(float error_cm, float ball_velocity_cm_s, float dt_s, float *output_mm)
 {
-    if (g_phase == PHASE_GO_PLUS) {
-        g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
-        if ((ball_cm - g_target_cm < 0.0f ? -(ball_cm - g_target_cm) : ball_cm - g_target_cm) < BALL_HOLD_TOL_CM ||
-            (t - g_phase_start_ms > SEG_TIMEOUT_MS)) {
-            g_phase = PHASE_GO_MINUS;
-            g_phase_start_ms = t;
-        }
-    } else if (g_phase == PHASE_GO_MINUS) {
-        g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
-        if ((ball_cm - g_target_cm < 0.0f ? -(ball_cm - g_target_cm) : ball_cm - g_target_cm) < BALL_HOLD_TOL_CM ||
-            (t - g_phase_start_ms > SEG_TIMEOUT_MS)) {
-#if TEST_LOOP
-            g_phase = PHASE_GO_PLUS;
-#else
-            g_phase = PHASE_DONE;
-#endif
-            g_phase_start_ms = t;
-        }
-    } else {
-        g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;   /* 停在 -5 */
+    float derivative = -ball_velocity_cm_s;
+    float unsaturated;
+    float limited;
+    float max_delta;
+
+    /* 积分分离：大误差期间不累加，避免折返时积分冲击。 */
+    if (absf_local(error_cm) <= PID_INTEGRAL_ZONE_CM) {
+        g_pid.integral += error_cm * dt_s;
+        g_pid.integral = clampf_local(g_pid.integral,
+                                      -PID_INTEGRAL_LIMIT_CM_S,
+                                      PID_INTEGRAL_LIMIT_CM_S);
     }
+
+    unsaturated = g_pid.kp * error_cm +
+                  g_pid.ki * g_pid.integral +
+                  g_pid.kd * derivative;
+    if (!finitef_local(unsaturated)) {
+        pid_reset();
+        *output_mm = 0.0f;
+        return false;
+    }
+
+    limited = clampf_local(unsaturated, -PID_OUTPUT_LIMIT_MM, PID_OUTPUT_LIMIT_MM);
+    max_delta = PID_OUTPUT_SLEW_MM_S * dt_s;
+    limited = clampf_local(limited,
+                           g_pid.last_output_mm - max_delta,
+                           g_pid.last_output_mm + max_delta);
+    limited = clampf_local(limited, -PID_OUTPUT_LIMIT_MM, PID_OUTPUT_LIMIT_MM);
+    if (!finitef_local(limited)) {
+        pid_reset();
+        *output_mm = 0.0f;
+        return false;
+    }
+
+    g_pid.last_output_mm = limited;
+    *output_mm = limited;
+    return true;
 }
 
-/* ==================== 控制步 (每收到一帧新视觉数据调用) ==================== */
-static uint32_t g_last_ctrl_ms = 0;
+/* ==================== 第三问状态机 ==================== */
+typedef enum {
+    PHASE_WAIT_VISION = 0,
+    PHASE_GO_PLUS,
+    PHASE_GO_MINUS,
+    PHASE_HOLD_MINUS,
+    PHASE_SAFE
+} ControlPhase;
+
+typedef enum {
+    FAULT_NONE = 0,
+    FAULT_WAIT_VISION_TIMEOUT,
+    FAULT_VISION_TIMEOUT,
+    FAULT_PLUS_TIMEOUT,
+    FAULT_TASK_TIMEOUT,
+    FAULT_FINAL_HOLD_TIMEOUT,
+    FAULT_PID_NUMERIC
+} FaultCode;
+
+static ControlPhase g_phase = PHASE_WAIT_VISION;
+static FaultCode g_fault = FAULT_NONE;
+static uint32_t g_boot_ms = 0U;
+static uint32_t g_phase_start_ms = 0U;
+static uint32_t g_task_start_ms = 0U;
+static uint32_t g_arrival_start_ms = 0U;
+static uint32_t g_task_finish_ms = 0U;
+static uint32_t g_last_control_ms = 0U;
+
+static void enter_safe(FaultCode fault)
+{
+    tmc2208_disable();
+    pid_reset();
+    g_control_mm = 0.0f;
+    g_fault = fault;
+    g_phase = PHASE_SAFE;
+    g_phase_start_ms = now_ms();
+}
+
+static bool target_is_settled(uint32_t time_ms)
+{
+    bool inside = (absf_local(g_target_cm - g_ball_cm) <= ARRIVAL_TOL_CM) &&
+                  (absf_local(g_ball_vel_cm_s) <= ARRIVAL_SPEED_CM_S);
+
+    if (!inside) {
+        g_arrival_start_ms = 0U;
+        return false;
+    }
+    if (g_arrival_start_ms == 0U) {
+        g_arrival_start_ms = time_ms;
+        return false;
+    }
+    return (time_ms - g_arrival_start_ms) >= ARRIVAL_DWELL_MS;
+}
+
+static bool trajectory_update(uint32_t time_ms)
+{
+    switch (g_phase) {
+        case PHASE_WAIT_VISION:
+            if (g_ball_valid) {
+                g_phase = PHASE_GO_PLUS;
+                g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
+                g_phase_start_ms = time_ms;
+                g_task_start_ms = time_ms;
+                g_arrival_start_ms = 0U;
+                g_last_control_ms = time_ms - VISION_PERIOD_MS;
+                pid_reset();
+                tmc2208_enable();
+            } else if ((time_ms - g_boot_ms) > WAIT_VISION_TIMEOUT_MS) {
+                enter_safe(FAULT_WAIT_VISION_TIMEOUT);
+                return false;
+            }
+            break;
+
+        case PHASE_GO_PLUS:
+            g_target_cm = BALL_CENTER_CM + BALL_STEP_CM;
+            if (target_is_settled(time_ms)) {
+                g_phase = PHASE_GO_MINUS;
+                g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
+                g_phase_start_ms = time_ms;
+                g_arrival_start_ms = 0U;
+                pid_reset();
+            } else if ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS) {
+                enter_safe(FAULT_PLUS_TIMEOUT);
+                return false;
+            }
+            break;
+
+        case PHASE_GO_MINUS:
+            g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
+            if (target_is_settled(time_ms)) {
+                g_phase = PHASE_HOLD_MINUS;
+                g_phase_start_ms = time_ms;
+                g_task_finish_ms = time_ms - g_task_start_ms;
+                g_arrival_start_ms = 0U;
+            } else if ((time_ms - g_task_start_ms) > TASK_TIMEOUT_MS) {
+                enter_safe(FAULT_TASK_TIMEOUT);
+                return false;
+            }
+            break;
+
+        case PHASE_HOLD_MINUS:
+            g_target_cm = BALL_CENTER_CM - BALL_STEP_CM;
+            if ((time_ms - g_phase_start_ms) > FINAL_HOLD_TIMEOUT_MS) {
+                enter_safe(FAULT_FINAL_HOLD_TIMEOUT);
+                return false;
+            }
+            break;
+
+        case PHASE_SAFE:
+        default:
+            return false;
+    }
+    return g_phase != PHASE_WAIT_VISION;
+}
 
 static void control_step(void)
 {
-    uint32_t t = now_ms();
+    uint32_t time_ms = now_ms();
+    float dt_s;
+    float motor_relative_mm;
+    float max_motor_mm;
+    float min_motor_mm;
+    float steps_float;
+    int32_t target_steps;
 
-    if (!g_ctrl_started) {
-        g_ctrl_started  = 1;
-        g_phase_start_ms = t;
-        g_total_start_ms = t;
+    if (!trajectory_update(time_ms)) {
+        return;
     }
 
-    float dt = (float)(t - g_last_ctrl_ms) * 0.001f;
-    if (dt < 0.01f) dt = 0.01f;
-    if (dt > 0.25f) dt = 0.25f;
-    g_last_ctrl_ms = t;
+    dt_s = clampf_local((float)(time_ms - g_last_control_ms) * 0.001f, 0.01f, 0.15f);
+    g_last_control_ms = time_ms;
+    g_error_cm = g_target_cm - g_ball_cm;
 
-    /* 轨迹推进 */
-    trajectory_update(g_ball_cm, t);
-
-    /* 目标变化 -> 清积分 (防换段冲量) */
-    if (g_target_cm != g_last_target_cm) {
-        g_integral = 0.0f;
-        g_last_target_cm = g_target_cm;
+    if (!pid_update(g_error_cm, g_ball_vel_cm_s, dt_s, &g_control_mm)) {
+        enter_safe(FAULT_PID_NUMERIC);
+        return;
     }
 
-    /* PID */
-    g_err_cm  = g_target_cm - g_ball_cm;
-    g_lift_mm = pid_update(g_err_cm, g_ball_vel, dt);
+    motor_relative_mm = CONTROL_TO_MOTOR_SIGN * g_control_mm;
+    min_motor_mm = (ACTUATOR_REL_MIN_MM > -PID_OUTPUT_LIMIT_MM) ?
+                   ACTUATOR_REL_MIN_MM : -PID_OUTPUT_LIMIT_MM;
+    max_motor_mm = (ACTUATOR_REL_MAX_MM < PID_OUTPUT_LIMIT_MM) ?
+                   ACTUATOR_REL_MAX_MM : PID_OUTPUT_LIMIT_MM;
+    motor_relative_mm = clampf_local(motor_relative_mm, min_motor_mm, max_motor_mm);
 
-    /* 抬升量 -> 步数 (LIFT_SIGN 处理方向) */
-    int32_t steps = (int32_t)(LIFT_SIGN * g_lift_mm * TMC_STEPS_PER_MM);
-    tmc2208_move_to(steps);
+    steps_float = motor_relative_mm * TMC_STEPS_PER_MM;
+    steps_float = clampf_local(steps_float, -4800.0f, 4800.0f);
+    target_steps = (steps_float >= 0.0f) ?
+                   (int32_t)(steps_float + 0.5f) :
+                   (int32_t)(steps_float - 0.5f);
+    tmc2208_move_to(target_steps);
 }
 
-/* ==================== 显示 ==================== */
-/* 紧凑带符号浮点: "+12.34" / "+10.2" */
-static void fmt_snum(float v, int dec, int max_int, char *buf)
+static void control_supervise(void)
+{
+    uint32_t time_ms = now_ms();
+
+    if ((g_phase != PHASE_WAIT_VISION) && (g_phase != PHASE_SAFE) && vision_lost()) {
+        enter_safe(FAULT_VISION_TIMEOUT);
+        return;
+    }
+
+    if (g_phase == PHASE_WAIT_VISION) {
+        (void)trajectory_update(time_ms);
+    } else if ((g_phase == PHASE_GO_PLUS) &&
+               ((time_ms - g_phase_start_ms) > PLUS_TIMEOUT_MS)) {
+        enter_safe(FAULT_PLUS_TIMEOUT);
+    } else if ((g_phase == PHASE_GO_MINUS) &&
+               ((time_ms - g_task_start_ms) > TASK_TIMEOUT_MS)) {
+        enter_safe(FAULT_TASK_TIMEOUT);
+    } else if ((g_phase == PHASE_HOLD_MINUS) &&
+               ((time_ms - g_phase_start_ms) > FINAL_HOLD_TIMEOUT_MS)) {
+        enter_safe(FAULT_FINAL_HOLD_TIMEOUT);
+    }
+}
+
+/* ==================== OLED ==================== */
+static void fmt_snum(float value, int decimals, int max_integer_digits, char *buffer)
 {
     char sign = '+';
-    if (v < 0.0f) { sign = '-'; v = -v; }
-
     int scale = 1;
-    for (int i = 0; i < dec; i++) scale *= 10;
-    int iv = (int)v;
-    int fr = (int)((v - (float)iv) * (float)scale + 0.5f);
-    if (fr >= scale) { iv++; fr -= scale; }
-
+    int integer_part;
+    int fraction_part;
     int cap = 1;
-    for (int i = 0; i < max_int; i++) cap *= 10;
-    if (iv >= cap) iv = cap - 1;
+    int digits[4];
+    int count = 0;
+    int position = 0;
 
-    char id[4];
-    int  n = 0;
-    do { id[n++] = (char)('0' + iv % 10); iv /= 10; } while (iv > 0);
-
-    buf[0] = sign;
-    int pos = 1;
-    while (n > 0) buf[pos++] = id[--n];
-    if (dec > 0) {
-        buf[pos++] = '.';
-        int d = scale / 10;
-        for (int i = 0; i < dec; i++) { buf[pos++] = (char)('0' + (fr / d) % 10); d /= 10; }
+    if (value < 0.0f) {
+        sign = '-';
+        value = -value;
     }
-    buf[pos] = '\0';
+    for (int i = 0; i < decimals; i++) {
+        scale *= 10;
+    }
+    for (int i = 0; i < max_integer_digits; i++) {
+        cap *= 10;
+    }
+
+    integer_part = (int)value;
+    fraction_part = (int)((value - (float)integer_part) * (float)scale + 0.5f);
+    if (fraction_part >= scale) {
+        integer_part++;
+        fraction_part -= scale;
+    }
+    if (integer_part >= cap) {
+        integer_part = cap - 1;
+    }
+
+    do {
+        digits[count++] = integer_part % 10;
+        integer_part /= 10;
+    } while ((integer_part > 0) && (count < 4));
+
+    buffer[position++] = sign;
+    while (count > 0) {
+        buffer[position++] = (char)('0' + digits[--count]);
+    }
+    if (decimals > 0) {
+        int divisor = scale / 10;
+        buffer[position++] = '.';
+        for (int i = 0; i < decimals; i++) {
+            buffer[position++] = (char)('0' + (fraction_part / divisor) % 10);
+            divisor /= 10;
+        }
+    }
+    buffer[position] = '\0';
 }
 
-/* 步数 -> "±04000" */
-static void fmt_steps(int32_t v, char *buf)
+static void fmt_steps(int32_t value, char *buffer)
 {
     char sign = '+';
-    if (v < 0) { sign = '-'; v = -v; }
-    if (v > 99999) v = 99999;
-    buf[0] = sign;
-    buf[1] = (char)('0' + (v / 10000) % 10);
-    buf[2] = (char)('0' + (v / 1000)  % 10);
-    buf[3] = (char)('0' + (v / 100)   % 10);
-    buf[4] = (char)('0' + (v / 10)    % 10);
-    buf[5] = (char)('0' + v % 10);
-    buf[6] = '\0';
+    if (value < 0) {
+        sign = '-';
+        value = -value;
+    }
+    if (value > 99999) {
+        value = 99999;
+    }
+    buffer[0] = sign;
+    buffer[1] = (char)('0' + (value / 10000) % 10);
+    buffer[2] = (char)('0' + (value / 1000) % 10);
+    buffer[3] = (char)('0' + (value / 100) % 10);
+    buffer[4] = (char)('0' + (value / 10) % 10);
+    buffer[5] = (char)('0' + value % 10);
+    buffer[6] = '\0';
+}
+
+static const char *phase_text(void)
+{
+    switch (g_phase) {
+        case PHASE_WAIT_VISION: return "WAIT";
+        case PHASE_GO_PLUS:     return "GO+5";
+        case PHASE_GO_MINUS:    return "GO-5";
+        case PHASE_HOLD_MINUS:  return "HOLD";
+        case PHASE_SAFE:
+        default:                return "SAFE";
+    }
 }
 
 static void oled_update(void)
 {
-    char s[16];
+    char text[16];
 
     SSD1306_Clear();
-    SSD1306_ShowString(0, 20, "BALL CONTROL");
+    SSD1306_ShowString(0, 14, "TASK3 BALL PID");
 
-    if (ball_lost()) {
-        SSD1306_ShowString(1, 0, "VISION LOST");
-        SSD1306_ShowString(2, 0, "Hold position");
-        SSD1306_ShowString(3, 0, "Check camera");
+    if (g_phase == PHASE_SAFE) {
+        SSD1306_ShowString(2, 0, "SAFE MOTOR OFF");
+        SSD1306_ShowString(3, 0, "Fault:");
+        SSD1306_ShowNum(3, 42, (int32_t)g_fault, 2);
+        SSD1306_ShowString(5, 0, "Reset after check");
         SSD1306_Update();
         return;
     }
 
-    /* 球位置 */
+    if (g_phase == PHASE_WAIT_VISION) {
+        SSD1306_ShowString(2, 0, "Set nut:65.0mm");
+        SSD1306_ShowString(3, 0, "Motor disabled");
+        SSD1306_ShowString(5, 0, "Waiting vision");
+        SSD1306_Update();
+        return;
+    }
+
     SSD1306_ShowString(1, 0, "Ball:");
-    fmt_snum(g_ball_cm, 2, 2, s);
-    SSD1306_ShowString(1, 30, s);
-    SSD1306_ShowString(1, 84, "cm");
+    fmt_snum(g_ball_cm, 2, 2, text);
+    SSD1306_ShowString(1, 30, text);
+    SSD1306_ShowString(1, 78, "cm");
 
-    /* 目标 */
     SSD1306_ShowString(2, 0, "Tgt:");
-    fmt_snum(g_target_cm, 2, 2, s);
-    SSD1306_ShowString(2, 30, s);
-    SSD1306_ShowString(2, 84, "cm");
+    fmt_snum(g_target_cm, 2, 2, text);
+    SSD1306_ShowString(2, 30, text);
+    SSD1306_ShowString(2, 78, "cm");
 
-    /* 误差 */
-    SSD1306_ShowString(3, 0, "Err:");
-    fmt_snum(g_err_cm, 2, 2, s);
-    SSD1306_ShowString(3, 30, s);
+    SSD1306_ShowString(3, 0, "Vel:");
+    fmt_snum(g_ball_vel_cm_s, 1, 3, text);
+    SSD1306_ShowString(3, 30, text);
+    SSD1306_ShowString(3, 78, "cm/s");
 
-    /* 速度 */
-    SSD1306_ShowString(4, 0, "Vel:");
-    fmt_snum(g_ball_vel, 1, 2, s);
-    SSD1306_ShowString(4, 30, s);
-    SSD1306_ShowString(4, 66, "cm/s");
+    SSD1306_ShowString(4, 0, "Out:");
+    fmt_snum(g_control_mm, 2, 1, text);
+    SSD1306_ShowString(4, 30, text);
+    SSD1306_ShowString(4, 72, "mm");
 
-    /* 抬升量 */
-    SSD1306_ShowString(5, 0, "Lift:");
-    fmt_snum(g_lift_mm, 1, 2, s);
-    SSD1306_ShowString(5, 30, s);
-    SSD1306_ShowString(5, 66, "mm");
+    SSD1306_ShowString(5, 0, "Step:");
+    fmt_steps(tmc2208_get_position(), text);
+    SSD1306_ShowString(5, 30, text);
 
-    /* 步数 */
-    SSD1306_ShowString(6, 0, "Stp:");
-    fmt_steps(tmc2208_get_position(), s);
-    SSD1306_ShowString(6, 30, s);
+    SSD1306_ShowString(6, 0, "State:");
+    SSD1306_ShowString(6, 36, phase_text());
 
-    /* 阶段 + 已用时间 */
-    SSD1306_ShowString(7, 0, "Phs:");
-    if (g_phase == PHASE_GO_PLUS)      SSD1306_ShowString(7, 24, "+5");
-    else if (g_phase == PHASE_GO_MINUS) SSD1306_ShowString(7, 24, "-5");
-    else                                SSD1306_ShowString(7, 24, "OK ");
-    SSD1306_ShowString(7, 42, "T:");
-    fmt_snum((float)(now_ms() - g_total_start_ms) * 0.001f, 1, 1, s);
-    SSD1306_ShowString(7, 60, s);
-    SSD1306_ShowString(7, 84, "s");
-
+    SSD1306_ShowString(7, 0, "T:");
+    if (g_phase == PHASE_HOLD_MINUS) {
+        fmt_snum((float)g_task_finish_ms * 0.001f, 2, 1, text);
+    } else {
+        fmt_snum((float)(now_ms() - g_task_start_ms) * 0.001f, 2, 1, text);
+    }
+    SSD1306_ShowString(7, 12, text);
+    SSD1306_ShowString(7, 54, "s Rj:");
+    SSD1306_ShowNum(7, 84, (int32_t)g_rejected_frames, 3);
     SSD1306_Update();
 }
 
 /* ==================== 主函数 ==================== */
 int main(void)
 {
+    uint32_t last_ui_ms;
+
     SYSCFG_DL_init();
-    SysTick_Config(CPUCLK_FREQ / 1000);
+    SysTick_Config(CPUCLK_FREQ / 1000U);
+    g_boot_ms = now_ms();
 
-    /* 电机: 上电前把水管调到水平 (螺母 6.5cm 高), 当前位置 = 0 */
+    /*
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 参数/零点 -> 等待视觉 -> 最后使能。
+     * 上电前手动将移动端置于距电机端 65 mm 的水平位置。
+     */
     tmc2208_init();
-    tmc2208_set_max_speed(STEPPER_MAX_SPEED);
-    tmc2208_set_accel(STEPPER_ACCEL);
+    tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
+    tmc2208_set_accel(STEPPER_ACCEL_SPS2);
+    tmc2208_set_limits_mm(ACTUATOR_REL_MIN_MM, ACTUATOR_REL_MAX_MM);
     tmc2208_set_current_position(0);
-    tmc2208_enable();
 
-    /* OLED */
-    delay_ms(50);
+    delay_ms(50U);
     SSD1306_Init();
     SSD1306_Clear();
-    SSD1306_ShowString(0, 16, "BALL CONTROL");
-    SSD1306_ShowString(2, 10, "PID Init...");
-    SSD1306_ShowString(4, 10, "Waiting vision");
+    SSD1306_ShowString(0, 14, "TASK3 BALL PID");
+    SSD1306_ShowString(2, 0, "Set nut:65.0mm");
+    SSD1306_ShowString(3, 0, "Motor disabled");
+    SSD1306_ShowString(5, 0, "Waiting vision");
     SSD1306_Update();
 
-    /* UART */
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
-
-    uint32_t last_ui = 0;
+    last_ui_ms = now_ms();
 
     while (1) {
-        /* 1. 解析串口 */
-        process_uart();
+        uint32_t time_ms;
 
-        /* 2. 新视觉帧 -> 控制 */
+        process_uart();
         if (g_ball_new) {
-            g_ball_new = 0;
+            g_ball_new = false;
             control_step();
         }
+        control_supervise();
 
-        /* 3. OLED */
-        uint32_t t = now_ms();
-        if (t - last_ui >= 100) {
-            last_ui = t;
+        time_ms = now_ms();
+        if ((time_ms - last_ui_ms) >= 100U) {
+            last_ui_ms = time_ms;
             oled_update();
         }
+
+        /* 独立 LFCLK 看门狗只允许在主循环末尾喂；任何 ISR 都不喂狗。 */
+        DL_WWDT_restart(WWDT0_INST);
     }
 }

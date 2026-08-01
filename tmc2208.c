@@ -13,36 +13,42 @@
 #include "ti_msp_dl_config.h"
 
 /* ==================== 定时器参数 ==================== */
-#define STEP_CLK_HZ        4000000UL      /* TIMA0 时钟 (BUSCLK/8) */
+#define STEP_CLK_HZ        STEP_INST_CLK_FREQ /* 32 MHz BUSCLK / 8 = 4 MHz */
+#define HARD_MAX_SPEED_SPS 12000.0f
+#define HARD_MAX_ACCEL_SPS2 80000.0f
+#define HARD_MIN_LIMIT_STEPS ((int32_t)(TMC_HARD_MIN_REL_MM * TMC_STEPS_PER_MM))
+#define HARD_MAX_LIMIT_STEPS ((int32_t)(TMC_HARD_MAX_REL_MM * TMC_STEPS_PER_MM))
 
 /* ==================== 内部状态 ==================== */
-static int32_t  s_position  = 0;      /* 当前绝对位置 (步) */
-static int32_t  s_target    = 0;      /* 目标位置 (步) */
-static int32_t  s_remaining = 0;      /* 剩余步数 (正数) */
-static int8_t   s_dir       = 1;      /* 当前方向 +1 / -1 */
-static bool     s_moving    = false;
-static bool     s_enabled   = false;
+static volatile int32_t  s_position  = 0;      /* 当前绝对位置 (步) */
+static volatile int32_t  s_target    = 0;      /* 目标位置 (步) */
+static volatile int32_t  s_remaining = 0;      /* 剩余步数 (正数) */
+static volatile int8_t   s_dir       = 1;      /* 当前方向 +1 / -1 */
+static volatile bool     s_moving    = false;
+static volatile bool     s_enabled   = false;
 
 /* ==================== 速度 / 加减速 (步/s, 步/s^2) ==================== */
-static float    s_max_speed = 8000.0f;
-static float    s_accel     = 40000.0f;
-static float    s_min_speed = 200.0f;    /* 起步 / 低速兜底 */
-static float    s_cur_speed = 0.0f;      /* 当前速度 */
-static bool     s_decel     = false;     /* 已进入减速段 */
+static volatile float s_max_speed = 5000.0f;
+static volatile float s_accel     = 24000.0f;
+static const float    s_min_speed = 200.0f;    /* 起步 / 低速兜底 */
+static volatile float s_cur_speed = 0.0f;      /* 当前速度 */
+static volatile bool  s_decel     = false;     /* 已进入减速段 */
 
 /* 软限位 (步), 默认 ±40000 步 = ±50mm */
-static int32_t  s_min_limit = -40000;
-static int32_t  s_max_limit =  40000;
+static int32_t s_min_limit = HARD_MIN_LIMIT_STEPS;
+static int32_t s_max_limit = HARD_MAX_LIMIT_STEPS;
 
 /* ==================== 内部函数 ==================== */
 
 /* 设置步进间隔 (定时器 tick 数), LOAD=interval-1, CC=LOAD/2 -> 50% 占空比 */
 static void set_step_interval(uint32_t interval)
 {
-    uint32_t load = interval - 1;
+    uint32_t load;
 
-    if (load > 65535U) load = 65535U;   /* TIMA0 16 位 LOAD 上限 */
-    if (load < 2U)     load = 2U;
+    /* 寄存器写入前同函数硬限幅：TIMA0 LOAD 为 16 位，且至少留 3 tick。 */
+    if (interval > 65536U) interval = 65536U;
+    if (interval < 3U)     interval = 3U;
+    load = interval - 1U;
 
     DL_TimerA_setLoadValue(STEP_INST, load);
     DL_TimerA_setCaptureCompareValue(STEP_INST, load / 2U, DL_TIMER_CC_0_INDEX);
@@ -89,15 +95,35 @@ void tmc2208_init(void)
 void tmc2208_set_max_speed(float sps)
 {
     if (sps < 100.0f)  sps = 100.0f;
-    if (sps > 100000.0f) sps = 100000.0f;
+    if (sps > HARD_MAX_SPEED_SPS) sps = HARD_MAX_SPEED_SPS;
     s_max_speed = sps;
 }
 
 void tmc2208_set_accel(float sps2)
 {
     if (sps2 < 10.0f) sps2 = 10.0f;
-    if (sps2 > 1000000.0f) sps2 = 1000000.0f;
+    if (sps2 > HARD_MAX_ACCEL_SPS2) sps2 = HARD_MAX_ACCEL_SPS2;
     s_accel = sps2;
+}
+
+void tmc2208_set_limits_mm(float min_mm, float max_mm)
+{
+    int32_t min_steps;
+    int32_t max_steps;
+
+    if (min_mm < TMC_HARD_MIN_REL_MM) min_mm = TMC_HARD_MIN_REL_MM;
+    if (max_mm > TMC_HARD_MAX_REL_MM) max_mm = TMC_HARD_MAX_REL_MM;
+    if (min_mm >= max_mm) {
+        min_mm = TMC_HARD_MIN_REL_MM;
+        max_mm = TMC_HARD_MAX_REL_MM;
+    }
+
+    min_steps = (int32_t)(min_mm * TMC_STEPS_PER_MM);
+    max_steps = (int32_t)(max_mm * TMC_STEPS_PER_MM);
+    if (min_steps < HARD_MIN_LIMIT_STEPS) min_steps = HARD_MIN_LIMIT_STEPS;
+    if (max_steps > HARD_MAX_LIMIT_STEPS) max_steps = HARD_MAX_LIMIT_STEPS;
+    s_min_limit = min_steps;
+    s_max_limit = max_steps;
 }
 
 void tmc2208_set_current_position(int32_t steps)
@@ -112,6 +138,7 @@ void tmc2208_set_current_position(int32_t steps)
 
 void tmc2208_enable(void)
 {
+    stop_stepping();
     DL_GPIO_clearPins(TMC2208_PORT, TMC2208_EN_PIN);   /* EN 低 = 使能 */
     s_enabled = true;
 }
@@ -130,9 +157,20 @@ bool tmc2208_is_enabled(void)
 
 void tmc2208_move_to(int32_t target)
 {
-    /* 软限位 */
+    /*
+     * 执行器入口硬限幅：先限制到 100 mm 物理行程，再限制到应用软限位，
+     * 全部在启动 STEP 寄存器之前完成。
+     */
+    if (target < HARD_MIN_LIMIT_STEPS) target = HARD_MIN_LIMIT_STEPS;
+    if (target > HARD_MAX_LIMIT_STEPS) target = HARD_MAX_LIMIT_STEPS;
     if (target < s_min_limit) target = s_min_limit;
     if (target > s_max_limit) target = s_max_limit;
+
+    if (!s_enabled) {
+        s_target = s_position;
+        s_remaining = 0;
+        return;
+    }
 
     if (s_moving) {
         /* 移动中重新定位 (球控每 50ms 更新目标):
@@ -201,7 +239,10 @@ void tmc2208_move_to(int32_t target)
 
 void tmc2208_move_steps(int32_t steps)
 {
-    tmc2208_move_to(s_position + steps);
+    int64_t target = (int64_t)s_position + (int64_t)steps;
+    if (target < (int64_t)HARD_MIN_LIMIT_STEPS) target = HARD_MIN_LIMIT_STEPS;
+    if (target > (int64_t)HARD_MAX_LIMIT_STEPS) target = HARD_MAX_LIMIT_STEPS;
+    tmc2208_move_to((int32_t)target);
 }
 
 void tmc2208_stop(void)

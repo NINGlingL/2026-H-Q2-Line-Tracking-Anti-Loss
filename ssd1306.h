@@ -16,6 +16,7 @@
 #define SSD1306_WIDTH       128
 #define SSD1306_HEIGHT      64
 #define SSD1306_PAGES       8       // 64/8 = 8 页
+#define SSD1306_I2C_TIMEOUT_MS 10U  /* 单次总线等待上限 */
 
 /* ========== 控制字节 ========== */
 #define SSD1306_CMD_SINGLE  0x00    // 下一个字节是命令
@@ -32,6 +33,9 @@
 
 /** 初始化 OLED，必须在 SYSCFG_DL_init() 之后调用 */
 void SSD1306_Init(void);
+
+/** I2C 超时后返回 false；故障保持到下次复位，避免阻塞闭环主循环 */
+bool SSD1306_IsHealthy(void);
 
 /** 清屏 */
 void SSD1306_Clear(void);
