@@ -163,6 +163,10 @@ static uint8_t g_button_last_raw = 1U;
 static uint8_t g_button_stable = 1U;
 static uint32_t g_button_change_ms = 0U;
 
+/* 保留为全局符号，供 MCP 探针在线确认 OLED 刷新是否持续、总线是否健康。 */
+volatile uint32_t g_oled_refresh_count = 0U;
+volatile uint8_t g_oled_healthy_snapshot = 0U;
+
 static bool parse_float_token(const char *text, float *value, const char **end)
 {
     const char *p = text;
@@ -941,6 +945,8 @@ int main(void)
     delay_ms(50U);
     SSD1306_Init();
     oled_update(now_ms());
+    g_oled_refresh_count++;
+    g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
 
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
     last_ui_ms = now_ms();
@@ -961,6 +967,8 @@ int main(void)
         if ((time_ms - last_ui_ms) >= OLED_REFRESH_MS) {
             last_ui_ms = time_ms;
             oled_update(time_ms);
+            g_oled_refresh_count++;
+            g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
         }
 
         /* 独立 LFCLK 看门狗只允许在主循环末尾喂；任何 ISR 都不喂狗。 */
