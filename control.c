@@ -811,8 +811,9 @@ static void draw_oled(void)
     SSD1306_ShowString(1U, 0U, bits);
     SSD1306_ShowString(2U, 0U, track);
     if (g_imu.valid == 0U || g_imu.stale != 0U) {
-        (void) snprintf(line, sizeof(line), "YAW:IMU ERR P:%d",
-            ir.position);
+        (void) snprintf(line, sizeof(line), "IMU ERR ID:%02X E:%lu",
+            (unsigned int) g_imu.who_am_i,
+            (unsigned long) g_imu.failures);
     } else if (g_imu.calibrated == 0U) {
         (void) snprintf(line, sizeof(line), "YAW:CAL %u/%u",
             (unsigned int) g_imu.calibration_samples,
@@ -852,7 +853,7 @@ static void draw_oled(void)
 void Control_Init(uint32_t now_ms)
 {
     memset(&g_control, 0, sizeof(g_control));
-    memset(&g_imu, 0, sizeof(g_imu));
+    g_imu = ICM20948_GetLast();
     PID_Init(&g_line_pid, g_control_tuning.line_kp,
         g_control_tuning.line_ki, g_control_tuning.line_kd,
         g_control_tuning.line_integral_limit,
@@ -913,7 +914,7 @@ void Control_Service(uint32_t now_ms)
         if (ICM20948_Read(&g_imu, now_ms) != 0U) {
             g_imu_period_ms = IMU_PERIOD_MS;
         } else {
-            g_imu_period_ms = 500U;
+            g_imu_period_ms = 100U;
         }
     }
 #endif

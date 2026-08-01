@@ -29,7 +29,9 @@
 #define IMU_NOMINAL_PERIOD_MS   (20U)
 #define I2C_TIMEOUT_LOOPS       \
     ((CPUCLK_FREQ / 1000U) * APP_I2C_TIMEOUT_MS)
-#define I2C_HALF_PERIOD         (CPUCLK_FREQ / 200000U)
+#define I2C_HALF_PERIOD         (CPUCLK_FREQ / 100000U)
+#define I2C_READ_ATTEMPTS       (3U)
+#define ICM_RESTART_ATTEMPTS    (5U)
 
 static IMU_Data g_last;
 static uint8_t g_address = 0x68U;
@@ -238,7 +240,11 @@ static uint8_t read_registers(uint8_t reg, uint8_t *data, uint8_t length)
         recover_bus();
         return 0U;
     }
-    i2c_stop();
+    /*
+     * ICM20948_WE uses endTransmission(false) here.  Keep ownership of the
+     * bus and issue a repeated START; some ICM20948 boards reject a STOP
+     * between the register pointer write and the following read.
+     */
     if (i2c_start() == 0U ||
         i2c_write_byte((uint8_t) ((g_address << 1U) | 1U)) == 0U) {
         i2c_stop();
@@ -297,13 +303,16 @@ uint8_t ICM20948_Init(void)
     uint8_t address_index;
     uint8_t attempt;
     uint8_t who = 0U;
+    uint32_t previous_failures = g_last.failures;
 
     memset(&g_last, 0, sizeof(g_last));
+    g_last.failures = previous_failures;
     configure_gpio_i2c();
 
     for (address_index = 0U; address_index < 2U; address_index++) {
         g_address = addresses[address_index];
         for (attempt = 0U; attempt < 3U; attempt++) {
+            who = 0U;
             if (select_bank(BANK_0) != 0U &&
                 read_registers(REG_WHO_AM_I, &who, 1U) != 0U &&
                 who == ICM20948_ID) {
@@ -319,6 +328,7 @@ uint8_t ICM20948_Init(void)
     g_last.who_am_i = who;
     g_last.i2c_address = g_address;
     if (who != ICM20948_ID) {
+        g_last.failures++;
         g_last.valid = 0U;
         g_last.stale = 1U;
         return 0U;
@@ -328,11 +338,20 @@ uint8_t ICM20948_Init(void)
         return 0U;
     }
     delay_cycles(CPUCLK_FREQ / 10U);
-    if (select_bank(BANK_0) == 0U ||
-        read_registers(REG_WHO_AM_I, &who, 1U) == 0U ||
-        who != ICM20948_ID ||
+    who = 0U;
+    for (attempt = 0U; attempt < ICM_RESTART_ATTEMPTS; attempt++) {
+        if (select_bank(BANK_0) != 0U &&
+            read_registers(REG_WHO_AM_I, &who, 1U) != 0U &&
+            who == ICM20948_ID) {
+            break;
+        }
+        delay_cycles(CPUCLK_FREQ / 100U);
+    }
+    if (who != ICM20948_ID ||
         write_register(REG_PWR_MGMT_1, 0x01U) == 0U ||
         write_register(REG_PWR_MGMT_2, 0x00U) == 0U) {
+        g_last.who_am_i = who;
+        g_last.failures++;
         g_last.valid = 0U;
         g_last.stale = 1U;
         return 0U;
@@ -371,11 +390,30 @@ uint8_t ICM20948_Read(IMU_Data *data, uint32_t now_ms)
     float alpha;
     uint8_t stationary_candidate;
     uint8_t i;
+    uint8_t attempt;
+    uint8_t read_ok = 0U;
 
     if (data == NULL) {
         return 0U;
     }
-    if (read_registers(REG_ACCEL_XOUT_H, bytes, sizeof(bytes)) == 0U) {
+
+    /* Permit a module that was late powering up to join without a reset. */
+    if (g_last.who_am_i != ICM20948_ID) {
+        if (ICM20948_Init() == 0U) {
+            *data = g_last;
+            return 0U;
+        }
+        next = g_last;
+    }
+
+    for (attempt = 0U; attempt < I2C_READ_ATTEMPTS; attempt++) {
+        if (select_bank(BANK_0) != 0U &&
+            read_registers(REG_ACCEL_XOUT_H, bytes, sizeof(bytes)) != 0U) {
+            read_ok = 1U;
+            break;
+        }
+    }
+    if (read_ok == 0U) {
         g_last.failures++;
         g_last.stale = 1U;
         *data = g_last;
