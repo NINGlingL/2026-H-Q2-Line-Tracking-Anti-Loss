@@ -86,6 +86,11 @@
 #define STEPPER_MAX_SPEED_SPS        12000.0f
 #define STEPPER_ACCEL_SPS2            80000.0f
 
+/* 临时硬件隔离测试：绕过视觉/PID，在软件零点附近自动往返 ±3 mm。 */
+#define MOTOR_SELF_TEST_MODE           1U
+#define MOTOR_SELF_TEST_STEPS        2400
+#define MOTOR_SELF_TEST_DWELL_MS       600U
+
 #if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
 #error "UART baud rate must match MaixCAM protocol (115200 bps)"
 #endif
@@ -982,6 +987,8 @@ static void oled_update(uint32_t time_ms)
 int main(void)
 {
     uint32_t last_ui_ms;
+    uint32_t last_motor_test_ms;
+    int32_t motor_test_target = MOTOR_SELF_TEST_STEPS;
 
     SYSCFG_DL_init();
     SysTick_Config(CPUCLK_FREQ / 1000U);
@@ -1012,18 +1019,28 @@ int main(void)
 
     NVIC_EnableIRQ(UART_0_INST_INT_IRQN);
     last_ui_ms = now_ms();
+    last_motor_test_ms = last_ui_ms;
 
     while (1) {
         uint32_t time_ms;
 
         time_ms = now_ms();
-        service_start_button(time_ms);
         process_uart();
-        if (g_ball_new) {
-            g_ball_new = false;
-            control_step();
+        if (MOTOR_SELF_TEST_MODE != 0U) {
+            if (!tmc2208_is_moving() &&
+                ((time_ms - last_motor_test_ms) >= MOTOR_SELF_TEST_DWELL_MS)) {
+                tmc2208_move_to(motor_test_target);
+                motor_test_target = -motor_test_target;
+                last_motor_test_ms = time_ms;
+            }
+        } else {
+            service_start_button(time_ms);
+            if (g_ball_new) {
+                g_ball_new = false;
+                control_step();
+            }
+            control_supervise();
         }
-        control_supervise();
 
         time_ms = now_ms();
         if ((time_ms - last_ui_ms) >= OLED_REFRESH_MS) {
