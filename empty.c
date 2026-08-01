@@ -88,8 +88,11 @@
 
 /* 临时硬件隔离测试：绕过视觉/PID，每段直发 4500 脉冲（约 5.6 mm）。 */
 #define MOTOR_SELF_TEST_MODE           1U
+#define MOTOR_SELF_TEST_LIFT_STEPS   4000U
 #define MOTOR_SELF_TEST_STEPS        4500U
-#define MOTOR_SELF_TEST_PULSE_CYCLES (CPUCLK_FREQ / 2000U)
+#define MOTOR_SELF_TEST_PULSE_HZ     2000U
+#define MOTOR_SELF_TEST_PULSE_CYCLES \
+    (CPUCLK_FREQ / (MOTOR_SELF_TEST_PULSE_HZ * 2U))
 
 #if UART_0_BAUD_RATE != UART_BAUDRATE_BPS
 #error "UART baud rate must match MaixCAM protocol (115200 bps)"
@@ -991,9 +994,22 @@ static void oled_show_motor_test(int8_t direction, uint32_t legs)
     SSD1306_ShowString(3, 0, "DIST :5.6mm");
     SSD1306_ShowString(4, 0, "DIR  :");
     SSD1306_ShowString(4, 42, (direction < 0) ? "REVERSE" : "FORWARD");
+    SSD1306_ShowString(5, 0, "SPEED:2000sps");
     SSD1306_ShowString(6, 0, "LEG  :");
     SSD1306_ShowNum(6, 42, (int32_t)legs, 5);
     SSD1306_ShowString(7, 0, "OLED :LOW RATE");
+    SSD1306_Update();
+}
+
+static void oled_show_motor_lift(void)
+{
+    SSD1306_Clear();
+    SSD1306_ShowString(0, 8, "MOTOR GPIO TEST");
+    SSD1306_ShowString(2, 0, "START:LIFT UP");
+    SSD1306_ShowString(3, 0, "LIFT :5.0mm");
+    SSD1306_ShowString(4, 0, "STEP :4000");
+    SSD1306_ShowString(5, 0, "SPEED:2000sps");
+    SSD1306_ShowString(7, 0, "THEN :AUTO SWEEP");
     SSD1306_Update();
 }
 
@@ -1001,6 +1017,7 @@ static void oled_show_motor_test(int8_t direction, uint32_t legs)
 int main(void)
 {
     uint32_t last_ui_ms;
+    uint32_t motor_lift_steps = 0U;
     uint32_t motor_test_steps = 0U;
     uint32_t motor_test_legs = 0U;
     int8_t motor_test_direction = -1;
@@ -1036,7 +1053,7 @@ int main(void)
         DL_GPIO_enableOutput(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
         DL_GPIO_clearPins(TMC2208_PORT, TMC2208_DIR_PIN);
         SSD1306_Init();
-        oled_show_motor_test(motor_test_direction, motor_test_legs);
+        oled_show_motor_lift();
         g_oled_refresh_count++;
         g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
     }
@@ -1060,8 +1077,19 @@ int main(void)
             delay_cycles(MOTOR_SELF_TEST_PULSE_CYCLES);
             DL_GPIO_clearPins(GPIO_STEP_C0_PORT, GPIO_STEP_C0_PIN);
             delay_cycles(MOTOR_SELF_TEST_PULSE_CYCLES);
-            motor_test_steps++;
-            if (motor_test_steps >= MOTOR_SELF_TEST_STEPS) {
+            if (motor_lift_steps < MOTOR_SELF_TEST_LIFT_STEPS) {
+                motor_lift_steps++;
+                if (motor_lift_steps == MOTOR_SELF_TEST_LIFT_STEPS) {
+                    motor_test_steps = 0U;
+                    oled_show_motor_test(motor_test_direction, motor_test_legs);
+                    g_oled_refresh_count++;
+                    g_oled_healthy_snapshot = SSD1306_IsHealthy() ? 1U : 0U;
+                }
+            } else {
+                motor_test_steps++;
+            }
+            if ((motor_lift_steps >= MOTOR_SELF_TEST_LIFT_STEPS) &&
+                (motor_test_steps >= MOTOR_SELF_TEST_STEPS)) {
                 motor_test_steps = 0U;
                 motor_test_legs++;
                 motor_test_direction = (int8_t)-motor_test_direction;
