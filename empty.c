@@ -9,8 +9,8 @@
  *   O(0 cm) -> +5 cm -> -5 cm，并保持在 -5 cm；总时间不得超过 5 s。
  *
  * 平衡位置设置:
- *   本次单功能测试从 77 mm 平衡位开始。
- *   按下 PB21 后向下移动 10 mm，到达 67 mm 并保持。
+ *   本次单功能测试从 67 mm 位置开始。
+ *   按下 PB21 后再向下移动 5 mm，到达 62 mm 并保持。
  */
 
 #include "ti_msp_dl_config.h"
@@ -46,8 +46,9 @@
 #define FINAL_HOLD_TIMEOUT_MS         60000U
 
 #define BALANCE_HEIGHT_MM             77.0f
-#define TEST_DESCENT_MM               10.0f
-#define TEST_TARGET_HEIGHT_MM         (BALANCE_HEIGHT_MM - TEST_DESCENT_MM)
+#define TEST_START_HEIGHT_MM          67.0f
+#define TEST_DESCENT_MM                5.0f
+#define TEST_TARGET_HEIGHT_MM         (TEST_START_HEIGHT_MM - TEST_DESCENT_MM)
 #define ACTUATOR_MIN_MM                0.0f
 #define ACTUATOR_MAX_MM              100.0f
 #define ACTUATOR_TRAVEL_MM           (ACTUATOR_MAX_MM - ACTUATOR_MIN_MM)
@@ -421,13 +422,13 @@ static void enter_safe(FaultCode fault)
 static void start_down_move(uint32_t time_ms)
 {
     int32_t start_steps =
-        (int32_t)(BALANCE_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
+        (int32_t)(TEST_START_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
     int32_t target_steps =
         (int32_t)(TEST_TARGET_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f);
 
     /*
-     * 当前位置由用户确认在 77 mm 平衡位。PB21 只在初始等待状态响应
-     * 一次，目标从 61600 微步降到 53600 微步，即向下移动 10 mm。
+     * 当前位置由用户确认在 67 mm。PB21 只在初始等待状态响应一次，
+     * 目标从 53600 微步降到 49600 微步，即再向下移动 5 mm。
      */
     tmc2208_set_current_position(start_steps);
     tmc2208_enable();
@@ -756,7 +757,7 @@ static void oled_show_balance_setup(uint32_t time_ms)
     SSD1306_ShowString(0, 90, "ms");
 
     if (g_phase == PHASE_WAIT_BALANCE) {
-        SSD1306_ShowString(1, 0, "DOWN TEST 10.0MM");
+        SSD1306_ShowString(1, 0, "DOWN TEST 5.0MM");
         SSD1306_ShowString(2, 0, "KEY:PB21 M:OFF");
         SSD1306_ShowString(3, 0, "PRESS PB21 TO DOWN");
         SSD1306_ShowString(4, 0, "Rx:");
@@ -769,17 +770,17 @@ static void oled_show_balance_setup(uint32_t time_ms)
         SSD1306_ShowString(5, 54, "V:");
         fmt_snum(g_ball_vel_cm_s, 1, 3, text);
         SSD1306_ShowString(5, 66, text);
-        SSD1306_ShowString(6, 0, "START:77 TARGET:67");
+        SSD1306_ShowString(6, 0, "START:67 TARGET:62");
         SSD1306_ShowString(7, 0, "VISION PID:DISABLED");
     } else if (g_phase == PHASE_TEST_MOVE) {
-        SSD1306_ShowString(1, 0, "LOWERING TO 67.0MM");
+        SSD1306_ShowString(1, 0, "LOWERING TO 62.0MM");
         SSD1306_ShowString(2, 0, "MOTOR:");
         SSD1306_ShowString(2, 36, motor_status_text());
         SSD1306_ShowString(3, 0, "POS:");
         fmt_unum(from_motor_mm, 1, 2, text);
         SSD1306_ShowString(3, 24, text);
         SSD1306_ShowString(3, 54, "mm");
-        SSD1306_ShowString(4, 0, "TARGET:67.0mm");
+        SSD1306_ShowString(4, 0, "TARGET:62.0mm");
         SSD1306_ShowString(5, 0, "Rx:");
         SSD1306_ShowNum(5, 18, (int32_t)g_accepted_frames, 5);
         SSD1306_ShowString(5, 54, "Rj:");
@@ -789,8 +790,8 @@ static void oled_show_balance_setup(uint32_t time_ms)
     } else {
         SSD1306_ShowString(1, 0, "DOWN TEST COMPLETE");
         SSD1306_ShowString(2, 0, "MOTOR:IDLE HOLD:ON");
-        SSD1306_ShowString(3, 0, "POS:67.0mm");
-        SSD1306_ShowString(4, 0, "MOVED DOWN:10.0mm");
+        SSD1306_ShowString(3, 0, "POS:62.0mm");
+        SSD1306_ShowString(4, 0, "MOVED DOWN:5.0mm");
         SSD1306_ShowString(5, 0, "PB21:LOCKED");
         SSD1306_ShowString(6, 0, "VISION PID:DISABLED");
         SSD1306_ShowString(7, 0, "TEST STEP COMPLETE");
@@ -955,15 +956,15 @@ int main(void)
     g_button_change_ms = g_phase_start_ms;
 
     /*
-     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 把当前位置记为 77 mm
-     * -> 等待 PB21 -> 向下降到 67 mm 并保持。本阶段不进入视觉 PID。
+     * 安全上电顺序：EN 禁用 -> STEP 停止 -> 把当前位置记为 67 mm
+     * -> 等待 PB21 -> 再向下降到 62 mm 并保持。本阶段不进入视觉 PID。
      */
     tmc2208_init();
     tmc2208_set_max_speed(STEPPER_MAX_SPEED_SPS);
     tmc2208_set_accel(STEPPER_ACCEL_SPS2);
     tmc2208_set_limits_mm(ACTUATOR_MIN_MM, ACTUATOR_MAX_MM);
     tmc2208_set_current_position(
-        (int32_t)(BALANCE_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f));
+        (int32_t)(TEST_START_HEIGHT_MM * TMC_STEPS_PER_MM + 0.5f));
 
     delay_ms(50U);
     SSD1306_Init();
