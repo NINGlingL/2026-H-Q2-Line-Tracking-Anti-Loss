@@ -4,6 +4,7 @@ keil/Listings/
 keil/*.uvguix.*
 keil/*.map
 keil/build_cli.log
+keil/*_build.log
 
 # Other toolchain build output
 gcc/Debug/
