@@ -1,0 +1,19 @@
+# Keil generated output and per-user state
+keil/Objects/
+keil/Listings/
+keil/*.map
+keil/*.uvguix.*
+
+# Common embedded build products
+*.o
+*.d
+*.axf
+*.hex
+*.lnp
+*.dep
+*.build_log.htm
+
+# Local editor/cache files
+.vscode/
+__pycache__/
+*.pyc
