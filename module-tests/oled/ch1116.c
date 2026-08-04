@@ -1,0 +1,380 @@
+/**
+ * CH1116 驱动实现 (I2C)
+ * MSPM0G3507 + DriverLib
+ */
+
+#include "ch1116.h"
+
+/* ========== 显示缓冲区 (128x64 = 1024 字节) ========== */
+static uint8_t OLED_Buffer[CH1116_WIDTH * CH1116_HEIGHT / 8];
+
+/* ========== 6x8 ASCII 字库 (字符 0x20 ~ 0x7E) ========== */
+static const uint8_t Font6x8[][6] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00}, /* 空格 */
+    {0x00,0x00,0x5F,0x00,0x00,0x00}, /* ! */
+    {0x00,0x07,0x00,0x07,0x00,0x00}, /* " */
+    {0x14,0x7F,0x14,0x7F,0x14,0x00}, /* # */
+    {0x24,0x2A,0x7F,0x2A,0x12,0x00}, /* $ */
+    {0x23,0x13,0x08,0x64,0x62,0x00}, /* % */
+    {0x36,0x49,0x55,0x22,0x50,0x00}, /* & */
+    {0x00,0x05,0x03,0x00,0x00,0x00}, /* ' */
+    {0x00,0x1C,0x22,0x41,0x00,0x00}, /* ( */
+    {0x00,0x41,0x22,0x1C,0x00,0x00}, /* ) */
+    {0x08,0x2A,0x1C,0x2A,0x08,0x00}, /* * */
+    {0x08,0x08,0x3E,0x08,0x08,0x00}, /* + */
+    {0x00,0x50,0x30,0x00,0x00,0x00}, /* , */
+    {0x08,0x08,0x08,0x08,0x08,0x00}, /* - */
+    {0x00,0x60,0x60,0x00,0x00,0x00}, /* . */
+    {0x20,0x10,0x08,0x04,0x02,0x00}, /* / */
+    {0x3E,0x51,0x49,0x45,0x3E,0x00}, /* 0 */
+    {0x00,0x42,0x7F,0x40,0x00,0x00}, /* 1 */
+    {0x42,0x61,0x51,0x49,0x46,0x00}, /* 2 */
+    {0x21,0x41,0x45,0x4B,0x31,0x00}, /* 3 */
+    {0x18,0x14,0x12,0x7F,0x10,0x00}, /* 4 */
+    {0x27,0x45,0x45,0x45,0x39,0x00}, /* 5 */
+    {0x3C,0x4A,0x49,0x49,0x30,0x00}, /* 6 */
+    {0x01,0x71,0x09,0x05,0x03,0x00}, /* 7 */
+    {0x36,0x49,0x49,0x49,0x36,0x00}, /* 8 */
+    {0x06,0x49,0x49,0x29,0x1E,0x00}, /* 9 */
+    {0x00,0x36,0x36,0x00,0x00,0x00}, /* : */
+    {0x00,0x56,0x36,0x00,0x00,0x00}, /* ; */
+    {0x00,0x08,0x14,0x22,0x41,0x00}, /* < */
+    {0x14,0x14,0x14,0x14,0x14,0x00}, /* = */
+    {0x41,0x22,0x14,0x08,0x00,0x00}, /* > */
+    {0x02,0x01,0x51,0x09,0x06,0x00}, /* ? */
+    {0x32,0x49,0x79,0x41,0x3E,0x00}, /* @ */
+    {0x7E,0x11,0x11,0x11,0x7E,0x00}, /* A */
+    {0x7F,0x49,0x49,0x49,0x36,0x00}, /* B */
+    {0x3E,0x41,0x41,0x41,0x22,0x00}, /* C */
+    {0x7F,0x41,0x41,0x22,0x1C,0x00}, /* D */
+    {0x7F,0x49,0x49,0x49,0x41,0x00}, /* E */
+    {0x7F,0x09,0x09,0x01,0x01,0x00}, /* F */
+    {0x3E,0x41,0x41,0x51,0x32,0x00}, /* G */
+    {0x7F,0x08,0x08,0x08,0x7F,0x00}, /* H */
+    {0x00,0x41,0x7F,0x41,0x00,0x00}, /* I */
+    {0x20,0x40,0x41,0x3F,0x01,0x00}, /* J */
+    {0x7F,0x08,0x14,0x22,0x41,0x00}, /* K */
+    {0x7F,0x40,0x40,0x40,0x40,0x00}, /* L */
+    {0x7F,0x02,0x04,0x02,0x7F,0x00}, /* M */
+    {0x7F,0x04,0x08,0x10,0x7F,0x00}, /* N */
+    {0x3E,0x41,0x41,0x41,0x3E,0x00}, /* O */
+    {0x7F,0x09,0x09,0x09,0x06,0x00}, /* P */
+    {0x3E,0x41,0x51,0x21,0x5E,0x00}, /* Q */
+    {0x7F,0x09,0x19,0x29,0x46,0x00}, /* R */
+    {0x46,0x49,0x49,0x49,0x31,0x00}, /* S */
+    {0x01,0x01,0x7F,0x01,0x01,0x00}, /* T */
+    {0x3F,0x40,0x40,0x40,0x3F,0x00}, /* U */
+    {0x1F,0x20,0x40,0x20,0x1F,0x00}, /* V */
+    {0x7F,0x20,0x18,0x20,0x7F,0x00}, /* W */
+    {0x63,0x14,0x08,0x14,0x63,0x00}, /* X */
+    {0x03,0x04,0x78,0x04,0x03,0x00}, /* Y */
+    {0x61,0x51,0x49,0x45,0x43,0x00}, /* Z */
+    {0x00,0x00,0x7F,0x41,0x41,0x00}, /* [ */
+    {0x02,0x04,0x08,0x10,0x20,0x00}, /* 反斜杠 */
+    {0x41,0x41,0x7F,0x00,0x00,0x00}, /* ] */
+    {0x04,0x02,0x01,0x02,0x04,0x00}, /* ^ */
+    {0x40,0x40,0x40,0x40,0x40,0x00}, /* _ */
+    {0x00,0x01,0x02,0x04,0x00,0x00}, /* ` */
+    {0x20,0x54,0x54,0x54,0x78,0x00}, /* a */
+    {0x7F,0x48,0x44,0x44,0x38,0x00}, /* b */
+    {0x38,0x44,0x44,0x44,0x20,0x00}, /* c */
+    {0x38,0x44,0x44,0x48,0x7F,0x00}, /* d */
+    {0x38,0x54,0x54,0x54,0x18,0x00}, /* e */
+    {0x08,0x7E,0x09,0x01,0x02,0x00}, /* f */
+    {0x08,0x14,0x54,0x54,0x3C,0x00}, /* g */
+    {0x7F,0x08,0x04,0x04,0x78,0x00}, /* h */
+    {0x00,0x44,0x7D,0x40,0x00,0x00}, /* i */
+    {0x20,0x40,0x44,0x3D,0x00,0x00}, /* j */
+    {0x00,0x7F,0x10,0x28,0x44,0x00}, /* k */
+    {0x00,0x41,0x7F,0x40,0x00,0x00}, /* l */
+    {0x7C,0x04,0x18,0x04,0x78,0x00}, /* m */
+    {0x7C,0x08,0x04,0x04,0x78,0x00}, /* n */
+    {0x38,0x44,0x44,0x44,0x38,0x00}, /* o */
+    {0x7C,0x14,0x14,0x14,0x08,0x00}, /* p */
+    {0x08,0x14,0x14,0x18,0x7C,0x00}, /* q */
+    {0x7C,0x08,0x04,0x04,0x08,0x00}, /* r */
+    {0x48,0x54,0x54,0x54,0x20,0x00}, /* s */
+    {0x04,0x3F,0x44,0x40,0x20,0x00}, /* t */
+    {0x3C,0x40,0x40,0x20,0x7C,0x00}, /* u */
+    {0x1C,0x20,0x40,0x20,0x1C,0x00}, /* v */
+    {0x3C,0x40,0x30,0x40,0x3C,0x00}, /* w */
+    {0x44,0x28,0x10,0x28,0x44,0x00}, /* x */
+    {0x0C,0x50,0x50,0x50,0x3C,0x00}, /* y */
+    {0x44,0x64,0x54,0x4C,0x44,0x00}, /* z */
+    {0x00,0x08,0x36,0x41,0x00,0x00}, /* { */
+    {0x00,0x00,0x7F,0x00,0x00,0x00}, /* | */
+    {0x00,0x41,0x36,0x08,0x00,0x00}, /* } */
+    {0x08,0x04,0x08,0x10,0x08,0x00}, /* ~ */
+};
+
+/* ========== 底层 I2C 通信 ========== */
+
+static void I2C_WriteBytes(uint8_t *data, uint8_t len)
+{
+    DL_I2C_fillControllerTXFIFO(I2C_0_INST, data, len);
+    while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE));
+    DL_I2C_startControllerTransfer(I2C_0_INST, CH1116_I2C_ADDR,
+                                   DL_I2C_CONTROLLER_DIRECTION_TX, len);
+    while (DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_BUSY_BUS);
+    while (!(DL_I2C_getControllerStatus(I2C_0_INST) & DL_I2C_CONTROLLER_STATUS_IDLE));
+    DL_I2C_flushControllerTXFIFO(I2C_0_INST);
+}
+
+static void CH1116_WriteCmd(uint8_t cmd)
+{
+    uint8_t buf[2] = {CH1116_CMD_SINGLE, cmd};
+    I2C_WriteBytes(buf, 2);
+}
+
+static void CH1116_WriteData(uint8_t data)
+{
+    uint8_t buf[2] = {CH1116_DATA_STREAM, data};
+    I2C_WriteBytes(buf, 2);
+}
+
+/* ========== 基本操作 ========== */
+
+void CH1116_Init(void)
+{
+    /* === CH1116 初始化序列 === */
+
+    CH1116_WriteCmd(CH1116_DISPLAY_OFF);    /* 0xAE: 关闭显示 */
+
+    CH1116_WriteCmd(0x40);                  /* 设置显示起始行 = 0 */
+
+    CH1116_WriteCmd(0xB0);                  /* 设置页起始地址 = 0 */
+
+    CH1116_WriteCmd(0xC8);                  /* COM 扫描方向: 从 COM63 到 COM0 */
+
+    CH1116_WriteCmd(0xA1);                  /* 段重映射: column 127 = SEG0 (左右镜像) */
+
+    CH1116_WriteCmd(CH1116_NORMAL_DISPLAY); /* 0xA6: 正常显示 (非反色) */
+
+    CH1116_WriteCmd(0xA8);                  /* 设置多路复用比 */
+    CH1116_WriteCmd(0x3F);                  /* 1/64 duty (64 COM) */
+
+    CH1116_WriteCmd(0xD3);                  /* 设置显示偏移 */
+    CH1116_WriteCmd(0x00);                  /* 无偏移 */
+
+    CH1116_WriteCmd(0xD5);                  /* 设置时钟分频/振荡器频率 */
+    CH1116_WriteCmd(0x80);                  /* 分频=1, 频率≈375kHz */
+
+    CH1116_WriteCmd(0xD9);                  /* 设置预充电周期 */
+    CH1116_WriteCmd(0x22);                  /* phase1=2, phase2=2 */
+
+    CH1116_WriteCmd(0xDA);                  /* 设置 COM 引脚硬件配置 */
+    CH1116_WriteCmd(0x12);                  /* 交替 COM 引脚配置 */
+
+    CH1116_WriteCmd(0xDB);                  /* 设置 VCOMH 电压 */
+    CH1116_WriteCmd(0x30);                  /* VCOMH ≈ 0.83 × VCC */
+
+    CH1116_WriteCmd(0x8D);                  /* 电荷泵设置 */
+    CH1116_WriteCmd(0x14);                  /* 启用电荷泵 (内部升压) */
+
+    /* CH1116 特有: DC-DC 转换器控制 */
+    CH1116_WriteCmd(0xAD);                  /* DC-DC 控制命令 */
+    CH1116_WriteCmd(0x30);                  /* 启用内部 DC-DC 升压 */
+
+    CH1116_WriteCmd(CH1116_SET_CONTRAST);   /* 0x81: 对比度控制 */
+    CH1116_WriteCmd(0x7F);                  /* 对比度 = 127 (中间值) */
+
+    CH1116_WriteCmd(0x20);                  /* 设置内存寻址模式 */
+    CH1116_WriteCmd(0x00);                  /* 水平寻址模式 */
+
+    CH1116_WriteCmd(CH1116_DISPLAY_ON);     /* 0xAF: 开启显示 */
+
+    CH1116_Clear();
+    CH1116_Update();
+}
+
+void CH1116_Clear(void)
+{
+    memset(OLED_Buffer, 0x00, sizeof(OLED_Buffer));
+}
+
+void CH1116_Fill(uint8_t data)
+{
+    memset(OLED_Buffer, data, sizeof(OLED_Buffer));
+}
+
+void CH1116_Update(void)
+{
+    for (uint8_t page = 0; page < CH1116_PAGES; page++) {
+        CH1116_WriteCmd(0xB0 + page);   /* 设置页地址 */
+        CH1116_WriteCmd(0x00 + CH1116_COL_OFFSET);  /* 设置列低四位 (含2列偏移) */
+        CH1116_WriteCmd(0x10);                          /* 设置列高四位 */
+
+        /* 批量发送一页数据 */
+        for (uint8_t col = 0; col < CH1116_WIDTH; col++) {
+            CH1116_WriteData(OLED_Buffer[page * CH1116_WIDTH + col]);
+        }
+    }
+}
+
+void CH1116_SetCursor(uint8_t page, uint8_t col)
+{
+    /* 仅用于 ShowChar 定位，不在底层发 I2C */
+    (void)page;
+    (void)col;
+}
+
+/* ========== 显示功能 ========== */
+
+void CH1116_ShowChar(uint8_t page, uint8_t col, char ch)
+{
+    if (ch < 0x20 || ch > 0x7E) ch = ' ';  /* 非法字符显示空格 */
+    if (page >= CH1116_PAGES) return;
+    if (col + 6 > CH1116_WIDTH) return;
+
+    uint8_t idx = ch - 0x20;
+    for (uint8_t i = 0; i < 6; i++) {
+        OLED_Buffer[page * CH1116_WIDTH + col + i] = Font6x8[idx][i];
+    }
+}
+
+void CH1116_ShowString(uint8_t page, uint8_t col, const char *str)
+{
+    while (*str) {
+        if (col + 6 > CH1116_WIDTH) {
+            col = 0;
+            page++;
+            if (page >= CH1116_PAGES) return;
+        }
+        CH1116_ShowChar(page, col, *str);
+        col += 6;
+        str++;
+    }
+}
+
+void CH1116_DrawPixel(uint8_t x, uint8_t y, uint8_t color)
+{
+    if (x >= CH1116_WIDTH || y >= CH1116_HEIGHT) return;
+
+    uint8_t page = y / 8;
+    uint8_t bit  = y % 8;
+    uint16_t idx = page * CH1116_WIDTH + x;
+
+    if (color)
+        OLED_Buffer[idx] |= (1 << bit);
+    else
+        OLED_Buffer[idx] &= ~(1 << bit);
+}
+
+void CH1116_DrawHLine(uint8_t x, uint8_t y, uint8_t len, uint8_t color)
+{
+    for (uint8_t i = 0; i < len; i++)
+        CH1116_DrawPixel(x + i, y, color);
+}
+
+void CH1116_ShowNum(uint8_t page, uint8_t col, int32_t num, uint8_t len)
+{
+    char buf[12];
+    if (num < 0) {
+        CH1116_ShowChar(page, col, '-');
+        num = -num;
+        col += 6;
+        if (len > 0) len--;
+    }
+    /* 转换为字符串 */
+    uint8_t i = 0;
+    char tmp[12];
+    do {
+        tmp[i++] = '0' + (num % 10);
+        num /= 10;
+    } while (num > 0 && i < 11);
+
+    /* 补齐前导零 */
+    while (i < len && i < 11) tmp[i++] = '0';
+
+    /* 反转输出 */
+    while (i > 0) {
+        CH1116_ShowChar(page, col, tmp[--i]);
+        col += 6;
+    }
+}
+
+void CH1116_ShowUNum(uint8_t page, uint8_t col, uint32_t num, uint8_t len)
+{
+    uint8_t i = 0;
+    char tmp[12];
+    do {
+        tmp[i++] = '0' + (num % 10);
+        num /= 10;
+    } while (num > 0 && i < 11);
+
+    /* 补齐前导零 */
+    while (i < len && i < 11) tmp[i++] = '0';
+
+    /* 反转输出 */
+    while (i > 0) {
+        CH1116_ShowChar(page, col, tmp[--i]);
+        col += 6;
+    }
+}
+
+void CH1116_ShowFloat(uint8_t page, uint8_t col, float num, uint8_t len)
+{
+    /* 处理负数 */
+    if (num < 0) {
+        CH1116_ShowChar(page, col, '-');
+        num = -num;
+        col += 6;
+        if (len > 0) len--;
+    }
+
+    /* 分离整数和小数部分 (1位小数) */
+    int32_t int_part = (int32_t)num;
+    uint8_t dec_part = (uint8_t)((num - (float)int_part) * 10 + 0.5);
+
+    /* 显示整数部分 */
+    uint8_t int_len = (len > 2) ? (len - 2) : len;
+    CH1116_ShowNum(page, col, int_part, int_len);
+
+    /* 找到整数部分结束的列位置 */
+    if (int_part == 0) {
+        col += int_len * 6;
+    } else {
+        /* 计算整数位数 */
+        uint8_t digits = 0;
+        int32_t tmp = int_part;
+        while (tmp) { digits++; tmp /= 10; }
+        if (digits < int_len) digits = int_len;
+        col += digits * 6;
+    }
+
+    /* 显示小数点 */
+    CH1116_ShowChar(page, col, '.');
+    col += 6;
+
+    /* 显示小数部分 */
+    CH1116_ShowNum(page, col, dec_part, 1);
+}
+
+void CH1116_ShowChinese(uint8_t page, uint8_t col, const uint8_t *hz_data)
+{
+    if (page >= CH1116_PAGES - 1) return;       /* 需要 2 页 */
+    if (col + 16 > CH1116_WIDTH) return;         /* 16 列宽 */
+
+    for (uint8_t i = 0; i < 16; i++) {
+        /* 上半部分 */
+        OLED_Buffer[page * CH1116_WIDTH + col + i] = hz_data[i];
+        /* 下半部分 */
+        OLED_Buffer[(page + 1) * CH1116_WIDTH + col + i] = hz_data[i + 16];
+    }
+}
+
+void CH1116_ShowHZString(uint8_t page, uint8_t col, const uint8_t *str,
+                          const uint8_t (*font)[32], uint8_t font_start)
+{
+    while (*str) {
+        if (col + 16 > CH1116_WIDTH) {
+            col = 0;
+            page += 2;                          /* 每个汉字占 2 页 */
+            if (page >= CH1116_PAGES - 1) return;
+        }
+        uint8_t idx = *str - font_start;
+        CH1116_ShowChinese(page, col, font[idx]);
+        col += 16;
+        str++;
+    }
+}
