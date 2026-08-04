@@ -99,3 +99,8 @@ PB10/PB11。D153C V1.1 原理图确认其 6 针电机接口使用板载 3.3 V �
 
 打开 `keil/empty_LP_MSPM0G3507_nortos_keil.uvprojx` 后执行 Build。
 构建前 Keil 会自动运行 SysConfig。当前构建结果为 0 errors、0 warnings。
+
+## 开发对话记录
+
+本项目的完整 Codex 开发对话已按段归档，入口见
+[对话记录总览](docs/conversation-019fb683-28ab-7eb3-adbd-3c44aa83ff61/总览.md)。
